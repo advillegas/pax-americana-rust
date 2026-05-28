@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pax-core",
+    "crates/pax-master",
+    "crates/pax-client",
+]
+
+[workspace.package]
+version = "2.0.0"
+edition = "2021"
+license = "MIT"
+authors = ["Pax Americana"]
+repository = "https://github.com/advillegas/pax-americana-rust"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
+ureq = { version = "2", features = ["json"] }
+# IBKR TWS / IB Gateway socket API — blocking (sync) client
+ibapi = { version = "2", default-features = false, features = ["sync"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

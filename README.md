@@ -1,0 +1,162 @@
+# ⬡ Pax Americana (Rust)
+
+> Mirror an IBKR master account's **position structure** to one or more client accounts,
+> in real time, with proportional sizing and hard directional safety.
+
+A from-scratch Rust rewrite of the original Python copy-trading system. The Python build
+suffered from crashes (asyncio + Tk threading) and from **blind order mirroring**, which
+could open an accidental short when the master merely closed a long. This version fixes
+both: a single-binary-per-role native app built on a resilient blocking IBKR client, and a
+**target-position reconciliation engine** that makes accidental shorts structurally
+impossible.
+
+---
+
+## Why a rewrite
+
+| Problem (Python) | Fix (Rust) |
+|---|---|
+| Crashes from asyncio event loops inside Tk threads | Blocking `ibapi` client (crossbeam), one client per thread, no async runtime |
+| Master forced full TWS GUI | Connects directly to **IB Gateway** (headless) or TWS |
+| Mirrored raw BUY/SELL actions → a master *close* could open a client *short* | Mirrors **net positions**; trades only the delta toward a scaled target |
+| Order-replay drift, double placements | Idempotent reconciliation against an authoritative snapshot + per-symbol cooldown |
+| Fragile self-update / licensing coupling | Removed; clean, auditable core |
+
+---
+
+## Architecture
+
+```
+  Master server                         Client server(s)
+ ┌──────────────────────┐              ┌───────────────────────────────┐
+ │ IB Gateway (4001/2)  │              │ IB Gateway (4001/2)           │
+ │        ▲             │              │        ▲                      │
+ │        │ ibapi       │              │        │ ibapi (place orders) │
+ │  pax-master          │   HTTP       │  pax-client                   │
+ │   • net positions    │  snapshot    │   • polls /snapshot           │
+ │   • NetLiquidation   │ ───────────▶ │   • reads own positions       │
+ │   • HTTP API :5001   │  (poll)      │   • reconcile() → delta orders│
+ │   • themed GUI       │              │   • themed control GUI        │
+ └──────────────────────┘              └───────────────────────────────┘
+```
+
+* **`crates/pax-core`** — shared models, proportional sizing, risk clamps, the
+  reconciliation engine, and the theme palette. Pure Rust, fully unit-tested.
+* **`crates/pax-master`** — connects to the master's IB Gateway/TWS, tracks net positions
+  and balance, and serves an authoritative JSON snapshot over HTTP. Themed status GUI.
+* **`crates/pax-client`** — connects to its own IB Gateway/TWS, polls the master, and
+  reconciles its book to a proportionally-scaled copy of the master's structure.
+
+---
+
+## The safety model (the important part)
+
+The client never acts on an order *verb*. It compares **net positions**:
+
+```
+target_net(symbol) = round( master_net(symbol) × (client_balance / master_balance) × multiplier )
+delta              = target_net − client_current_net
+```
+
+It then trades only `|delta|` in the direction of `delta`. Consequences:
+
+* **Master closes a long → master net = 0 → client target = 0.** The client sells *toward
+  flat and stops*. It can never cross zero into a short. This is the exact bug the brief
+  called out, eliminated by construction.
+* **Orphan positions** (client holds, master flat) are closed to flat with market orders.
+* **Missing positions** (master holds, client flat) are opened, scaled.
+* **Genuine flips** (master is really net short) are split into an explicit *flatten* leg
+  then an *open* leg, so one fill can never be misread as "go short by selling".
+* **Long Only** clamps every target to `≥ 0`: a short can never be opened.
+
+Global safety guards refuse to trade when:
+* the master is disconnected, or
+* balances are unknown (sizing undefined), or
+* the master reports an empty book while the client holds multiple positions
+  (a likely connectivity glitch — never mass-close on bad data).
+
+See `crates/pax-core/src/reconcile.rs` and its tests (`cargo test -p pax-core`).
+
+---
+
+## Risk controls
+
+* **Proportional sizing** by `client_balance / master_balance`.
+* **Size multiplier** `0.1×–5.0×`.
+* **Max drawdown %** — halts trading when equity drops past the threshold from the session
+  baseline (resume with STOP → START).
+* **Max position notional ($)** and **max position quantity** clamps (0 = off).
+* **Per-symbol order cooldown** prevents duplicate submissions while fills settle.
+
+---
+
+## Prerequisites
+
+* Rust (stable). Install from <https://rustup.rs>.
+* **IB Gateway** (recommended) or **TWS**, logged in, with the API enabled:
+  *Configure → Settings → API → Enable ActiveX and Socket Clients*.
+* Use `127.0.0.1` (not `localhost`) for IB — TWS blocks IPv6.
+
+## Build
+
+```bash
+cargo build --release
+# binaries:
+#   target/release/pax-master(.exe)
+#   target/release/pax-client(.exe)
+```
+
+## Configure
+
+Copy `.env.example` and set values, or export the variables in the environment. Key ones:
+
+* Master: `PAX_IB_PORT` (4002 paper / 4001 live), `PAX_HTTP_BIND`, optional `PAX_API_KEY`.
+* Client: `PAX_MASTER_URL=http://MASTER_IP:5001`, optional `PAX_API_KEY` (must match).
+
+On the master, open the HTTP port in the firewall, e.g. on Windows:
+
+```powershell
+netsh advfirewall firewall add rule name="PaxAmericana" dir=in action=allow protocol=TCP localport=5001
+```
+
+## Run
+
+**Master server:**
+```bash
+pax-master
+```
+Serves: `GET /snapshot` (full structure), `GET /status`, `GET /balance`. When
+`PAX_API_KEY` is set, all endpoints require the `X-API-Key` header.
+
+**Client server(s):**
+```bash
+pax-client
+```
+Pick **Live/Paper**, set the **multiplier** and **max drawdown**, choose **Long & Short**
+or **Long Only**, then press **START**. **CLOSE ALL TRADES** cancels working orders and
+flattens every client position with market orders.
+
+---
+
+## HTTP API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/snapshot` | Authoritative master snapshot: net positions, balance, connected flag |
+| GET | `/positions` | Alias of `/snapshot` |
+| GET | `/balance` | `{ "balance": <f64>, "connected": <bool> }` |
+| GET | `/status` | Server status + position count + schema version |
+
+---
+
+## Notes & limitations
+
+* Instruments are treated as **stocks** routed `SMART` by default; currency/exchange are
+  carried from the master's contract. Extend `pax-client/src/ib.rs` for other asset types.
+* Reconciliation is intentionally **structure-based**, not order-replay; this is what makes
+  orphan-close / missing-open robust and idempotent.
+* Not affiliated with Interactive Brokers. Trading involves risk; test on paper first.
+
+## License
+
+MIT.

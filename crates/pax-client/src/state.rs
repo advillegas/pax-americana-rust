@@ -1,0 +1,155 @@
+//! Shared, thread-safe client state: GUI-set controls, engine-set status, and a log.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use parking_lot::Mutex;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountMode {
+    Live,
+    Paper,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TradeMode {
+    LongShort,
+    LongOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    /// Mirror the master's entire structure: open missing, close orphans, resize. This
+    /// is the recommended mode and the one that fulfils full structural sync.
+    ExistingPlusNew,
+    /// Ignore positions the master already held when START was pressed; only act on
+    /// changes after start (orphan closes always proceed).
+    NewOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogLevel {
+    Info,
+    Ok,
+    Warn,
+    Err,
+    Buy,
+    Sell,
+}
+
+#[derive(Debug, Clone)]
+pub struct LogLine {
+    pub ts: String,
+    pub level: LogLevel,
+    pub msg: String,
+}
+
+#[derive(Default)]
+pub struct LogBuffer {
+    lines: Vec<LogLine>,
+}
+
+impl LogBuffer {
+    const CAP: usize = 800;
+    pub fn push(&mut self, level: LogLevel, msg: impl Into<String>) {
+        self.lines.push(LogLine { ts: now_hms(), level, msg: msg.into() });
+        if self.lines.len() > Self::CAP {
+            let overflow = self.lines.len() - Self::CAP;
+            self.lines.drain(0..overflow);
+        }
+    }
+    pub fn clear(&mut self) {
+        self.lines.clear();
+    }
+    pub fn lines(&self) -> &[LogLine] {
+        &self.lines
+    }
+}
+
+/// Operator-set controls (GUI writes, engine reads).
+#[derive(Debug, Clone)]
+pub struct Controls {
+    pub account_mode: AccountMode,
+    pub trade_mode: TradeMode,
+    pub execution_mode: ExecutionMode,
+    pub multiplier: f64,
+    pub max_drawdown_pct: f64,
+    pub max_position_notional: f64,
+    pub max_position_qty: f64,
+}
+
+impl Default for Controls {
+    fn default() -> Self {
+        Controls {
+            account_mode: AccountMode::Live,
+            trade_mode: TradeMode::LongShort,
+            execution_mode: ExecutionMode::ExistingPlusNew,
+            multiplier: 1.0,
+            max_drawdown_pct: 10.0,
+            max_position_notional: 0.0,
+            max_position_qty: 0.0,
+        }
+    }
+}
+
+/// Engine-reported status (engine writes, GUI reads).
+#[derive(Debug, Clone, Default)]
+pub struct Status {
+    pub connected: bool,
+    pub account: String,
+    pub client_balance: f64,
+    pub master_balance: f64,
+    pub master_connected: bool,
+    pub master_positions: usize,
+    pub client_positions: usize,
+    pub drawdown_hit: bool,
+    pub last_sync: String,
+    pub orders_placed: u64,
+    pub orders_closed: u64,
+    pub orders_failed: u64,
+}
+
+pub struct SharedState {
+    pub running: AtomicBool,
+    pub close_all: AtomicBool,
+    pub controls: Mutex<Controls>,
+    pub status: Mutex<Status>,
+    pub log: Mutex<LogBuffer>,
+}
+
+impl SharedState {
+    pub fn new() -> Arc<Self> {
+        Arc::new(SharedState {
+            running: AtomicBool::new(false),
+            close_all: AtomicBool::new(false),
+            controls: Mutex::new(Controls::default()),
+            status: Mutex::new(Status::default()),
+            log: Mutex::new(LogBuffer::default()),
+        })
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::Relaxed)
+    }
+
+    pub fn log(&self, level: LogLevel, msg: impl Into<String>) {
+        self.log.lock().push(level, msg);
+    }
+
+    pub fn with_status<F: FnOnce(&mut Status)>(&self, f: F) {
+        let mut s = self.status.lock();
+        f(&mut s);
+    }
+}
+
+pub fn now_hms() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let h = (secs / 3600) % 24;
+    let m = (secs / 60) % 60;
+    let s = secs % 60;
+    format!("{h:02}:{m:02}:{s:02}")
+}

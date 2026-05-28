@@ -1,0 +1,19 @@
+[package]
+name = "pax-master"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "pax-master"
+
+[dependencies]
+pax-core = { path = "../pax-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+parking_lot = { workspace = true }
+ibapi = { workspace = true }
+eframe = "=0.31.1"
+egui = "=0.31.1"
+tiny_http = "0.12"

@@ -1,0 +1,304 @@
+//! The client trading engine.
+//!
+//! Runs on its own thread for the whole app lifetime, doing work only while the operator
+//! has pressed START. Each pass fetches the master snapshot, reads the client's own net
+//! positions, reconciles them into delta orders via [`pax_core::reconcile`], and submits
+//! those orders — with a per-symbol cooldown so in-flight fills are never double-ordered.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use ibapi::client::blocking::Client;
+use pax_core::{reconcile, IntentReason, ReconcileInput, Side, SizingParams};
+
+use crate::config::{stable_client_id, ClientConfig};
+use crate::ib;
+use crate::master_api::MasterApi;
+use crate::state::{AccountMode, ExecutionMode, LogLevel, SharedState, TradeMode};
+
+pub fn spawn(cfg: ClientConfig, state: Arc<SharedState>) {
+    thread::spawn(move || engine_main(cfg, state));
+}
+
+fn engine_main(cfg: ClientConfig, state: Arc<SharedState>) {
+    let api = MasterApi::new(&cfg.master_url, &cfg.master_api_key);
+    loop {
+        // Idle until the operator starts the engine.
+        while !state.is_running() {
+            thread::sleep(Duration::from_millis(200));
+        }
+        run_session(&cfg, &state, &api);
+        // Session ended; reflect disconnection and loop back to idle/reconnect.
+        state.with_status(|s| {
+            s.connected = false;
+        });
+    }
+}
+
+fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>, api: &MasterApi) {
+    let account_mode = state.controls.lock().account_mode;
+    let port = match account_mode {
+        AccountMode::Live => cfg.ib_port_live,
+        AccountMode::Paper => cfg.ib_port_paper,
+    };
+    let cid = stable_client_id();
+    let endpoint = format!("{}:{}", cfg.ib_host, port);
+    state.log(LogLevel::Info, format!("Connecting to IB {endpoint} clientId={cid}…"));
+
+    let client = match Client::connect(&endpoint, cid) {
+        Ok(c) => c,
+        Err(e) => {
+            state.log(
+                LogLevel::Err,
+                format!("IB connection failed: {e}. Check Gateway/TWS is running with API enabled."),
+            );
+            state.running.store(false, Ordering::Relaxed);
+            return;
+        }
+    };
+
+    let account = client
+        .managed_accounts()
+        .ok()
+        .and_then(|a| a.into_iter().next())
+        .unwrap_or_default();
+    let baseline = ib::read_balance(&client).unwrap_or(0.0);
+    state.log(LogLevel::Ok, format!("IB connected ✓ account={account}  balance=${baseline:.2}"));
+    state.with_status(|s| {
+        s.connected = true;
+        s.account = account.clone();
+        s.client_balance = baseline;
+        s.drawdown_hit = false;
+    });
+
+    let mut cooldown: HashMap<String, Instant> = HashMap::new();
+    let mut drawdown_hit = false;
+    let mut last_unreachable_warn: Option<Instant> = None;
+    let cooldown_dur = Duration::from_secs(cfg.order_cooldown_secs);
+    // Symbols the master already held at session start — used by "New Only" mode to
+    // suppress opening pre-existing master positions. Captured on first snapshot.
+    let mut baseline_symbols: Option<HashSet<String>> = None;
+
+    while state.is_running() {
+        // ── one-shot Close All request ───────────────────────────────────────
+        if state.close_all.swap(false, Ordering::Relaxed) {
+            do_close_all(&client, state);
+        }
+
+        // ── client balance + drawdown guard ──────────────────────────────────
+        let client_balance = ib::read_balance(&client).unwrap_or(0.0);
+        let max_dd = state.controls.lock().max_drawdown_pct;
+        if baseline > 0.0 && client_balance > 0.0 {
+            let dd = (baseline - client_balance) / baseline * 100.0;
+            if dd >= max_dd && !drawdown_hit {
+                drawdown_hit = true;
+                state.log(
+                    LogLevel::Err,
+                    format!("Max drawdown {max_dd:.1}% hit ({dd:.2}%) — trading halted. Press STOP/START to resume."),
+                );
+                state.with_status(|s| s.drawdown_hit = true);
+            }
+        }
+
+        // ── fetch master snapshot ────────────────────────────────────────────
+        let snap = match api.snapshot() {
+            Ok(s) => s,
+            Err(e) => {
+                let warn = last_unreachable_warn
+                    .map(|t| t.elapsed() > Duration::from_secs(30))
+                    .unwrap_or(true);
+                if warn {
+                    state.log(LogLevel::Warn, format!("Master sync skipped: {e}"));
+                    last_unreachable_warn = Some(Instant::now());
+                }
+                sleep_running(cfg.sync_interval_secs, state);
+                continue;
+            }
+        };
+
+        // ── read our own positions ───────────────────────────────────────────
+        let client_positions = match ib::read_positions(&client) {
+            Ok(p) => p,
+            Err(e) => {
+                state.log(LogLevel::Warn, format!("Position read failed: {e} — reconnecting"));
+                break; // outer loop reconnects
+            }
+        };
+
+        // Capture the master's starting structure once per session for New-Only mode.
+        if baseline_symbols.is_none() {
+            baseline_symbols = Some(snap.positions.iter().map(|p| p.symbol.clone()).collect());
+        }
+
+        let controls = state.controls.lock().clone();
+        state.with_status(|s| {
+            s.client_balance = client_balance;
+            s.master_balance = snap.balance;
+            s.master_connected = snap.connected;
+            s.master_positions = snap.positions.len();
+            s.client_positions = client_positions.len();
+            s.last_sync = crate::state::now_hms();
+        });
+
+        if drawdown_hit {
+            sleep_running(cfg.sync_interval_secs, state);
+            continue;
+        }
+
+        // ── reconcile + act ──────────────────────────────────────────────────
+        let sizing = SizingParams {
+            multiplier: controls.multiplier,
+            master_balance: snap.balance,
+            client_balance,
+            max_position_notional: controls.max_position_notional,
+            max_position_qty: controls.max_position_qty,
+            force_min_one: true,
+        };
+        let input = ReconcileInput {
+            master: &snap.positions,
+            client: &client_positions,
+            master_connected: snap.connected,
+            sizing,
+            long_only: controls.trade_mode == TradeMode::LongOnly,
+            split_zero_cross: true,
+            empty_master_guard: 2,
+        };
+        let result = reconcile(&input);
+
+        if result.blocked {
+            if let Some(reason) = result.blocked_reason {
+                let warn = last_unreachable_warn
+                    .map(|t| t.elapsed() > Duration::from_secs(30))
+                    .unwrap_or(true);
+                if warn {
+                    state.log(LogLevel::Warn, format!("Sync blocked — {reason}"));
+                    last_unreachable_warn = Some(Instant::now());
+                }
+            }
+        } else {
+            for intent in &result.intents {
+                // New-Only mode: skip opening positions the master already held at start.
+                // Orphan closes and reduces always proceed regardless of mode.
+                if controls.execution_mode == ExecutionMode::NewOnly
+                    && intent.reason == IntentReason::OpenMissing
+                {
+                    if let Some(base) = &baseline_symbols {
+                        if base.contains(&intent.symbol) {
+                            continue;
+                        }
+                    }
+                }
+                // Cooldown: don't re-submit a symbol while its last order settles.
+                if let Some(t) = cooldown.get(&intent.symbol) {
+                    if t.elapsed() < cooldown_dur {
+                        continue;
+                    }
+                }
+                match ib::place_order(
+                    &client,
+                    &intent.symbol,
+                    &intent.currency,
+                    &intent.exchange,
+                    intent.side,
+                    intent.qty,
+                    intent.kind,
+                    intent.limit_price,
+                    intent.aux_price,
+                ) {
+                    Ok(()) => {
+                        cooldown.insert(intent.symbol.clone(), Instant::now());
+                        let lvl = match intent.side {
+                            Side::Buy => LogLevel::Buy,
+                            Side::Sell => LogLevel::Sell,
+                        };
+                        state.log(
+                            lvl,
+                            format!(
+                                "{:<4} {:<6} qty={:.0} {} [{}]",
+                                intent.side.as_ib(),
+                                intent.symbol,
+                                intent.qty,
+                                intent.kind.as_ib(),
+                                intent.reason.label()
+                            ),
+                        );
+                        if is_closing(intent.reason) {
+                            state.with_status(|s| s.orders_closed += 1);
+                        } else {
+                            state.with_status(|s| s.orders_placed += 1);
+                        }
+                    }
+                    Err(e) => {
+                        state.with_status(|s| s.orders_failed += 1);
+                        state.log(LogLevel::Err, format!("Order failed {}: {e}", intent.symbol));
+                    }
+                }
+                thread::sleep(Duration::from_millis(300));
+            }
+        }
+
+        sleep_running(cfg.sync_interval_secs, state);
+    }
+
+    state.log(LogLevel::Warn, "Engine session ended.");
+}
+
+fn do_close_all(client: &Client, state: &Arc<SharedState>) {
+    state.log(LogLevel::Warn, "CLOSE ALL — cancelling working orders and flattening positions…");
+    if let Err(e) = ib::cancel_all(client) {
+        state.log(LogLevel::Warn, format!("Cancel-all warning: {e}"));
+    }
+    let positions = ib::read_positions(client).unwrap_or_default();
+    if positions.is_empty() {
+        state.log(LogLevel::Ok, "Close all — no open positions.");
+        return;
+    }
+    for p in &positions {
+        let side = Side::closing(p.net_qty);
+        let qty = p.net_qty.abs();
+        match ib::place_order(
+            client,
+            &p.symbol,
+            &p.currency,
+            &p.exchange,
+            side,
+            qty,
+            pax_core::OrderKind::Market,
+            0.0,
+            0.0,
+        ) {
+            Ok(_) => {
+                state.with_status(|s| s.orders_closed += 1);
+                state.log(LogLevel::Warn, format!("Close all: {} {} qty={:.0} MKT", side.as_ib(), p.symbol, qty));
+            }
+            Err(e) => {
+                state.with_status(|s| s.orders_failed += 1);
+                state.log(LogLevel::Err, format!("Close all failed {}: {e}", p.symbol));
+            }
+        }
+        thread::sleep(Duration::from_millis(300));
+    }
+    state.log(LogLevel::Ok, "Close all submitted.");
+}
+
+fn is_closing(reason: IntentReason) -> bool {
+    matches!(
+        reason,
+        IntentReason::CloseOrphan | IntentReason::ReduceToTarget | IntentReason::FlattenLeg
+    )
+}
+
+/// Sleep `secs`, but wake promptly (250ms granularity) if the engine is stopped.
+fn sleep_running(secs: u64, state: &Arc<SharedState>) {
+    let mut remaining = secs * 4;
+    while remaining > 0 {
+        if !state.is_running() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(250));
+        remaining -= 1;
+    }
+}
