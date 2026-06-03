@@ -83,6 +83,7 @@ export component ClientWindow inherits Window {
     in-out property <string> host;
     in-out property <string> live_port;
     in-out property <string> paper_port;
+    in-out property <string> account;
 
     in property <string> update_text;
     in property <bool> update_available;
@@ -177,6 +178,13 @@ export component ClientWindow inherits Window {
             LineField { value <=> root.live_port; width: 80px; }
             Text { text: "Paper"; color: #909fb7; width: 44px; vertical-alignment: center; }
             LineField { value <=> root.paper_port; width: 80px; }
+            Rectangle { }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "Account"; color: #909fb7; width: 90px; vertical-alignment: center; }
+            LineField { value <=> root.account; width: 160px; }
+            Text { text: "(blank = sole account; required if login has several)"; color: #5a6880; font-size: 11px; vertical-alignment: center; }
             Rectangle { }
         }
         HorizontalLayout {

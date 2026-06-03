@@ -9,14 +9,16 @@ use ibapi::contracts::Contract;
 use ibapi::orders::{Action, Order, Orders, PlaceOrder};
 use pax_core::{OrderKind, Position, Side, WorkingOrder};
 
-/// Snapshot the client's net positions (drains until `PositionEnd`).
-pub fn read_positions(client: &Client) -> Result<Vec<Position>, String> {
+/// Snapshot the client's net positions for `account` only (drains until `PositionEnd`).
+/// Positions in any OTHER account the login can access are ignored — critical when a
+/// login manages more than one account.
+pub fn read_positions(client: &Client, account: &str) -> Result<Vec<Position>, String> {
     let sub = client.positions().map_err(|e| e.to_string())?;
     let mut out: Vec<Position> = Vec::new();
     for update in &sub {
         match update {
             PositionUpdate::Position(p) => {
-                if p.position == 0.0 {
+                if p.position == 0.0 || p.account != account {
                     continue;
                 }
                 out.push(Position {
@@ -50,8 +52,10 @@ pub struct MarginInfo {
     pub maint_margin: f64,
 }
 
-/// Read NetLiquidation + margin/SMA fields for the connected account in one request.
-pub fn read_margin(client: &Client) -> Result<MarginInfo, String> {
+/// Read NetLiquidation + margin/SMA fields for `account` only. The "All" group returns
+/// per-account rows; we take only the target account's so a multi-account login can't
+/// skew sizing/margin by aggregating across accounts.
+pub fn read_margin(client: &Client, account: &str) -> Result<MarginInfo, String> {
     let group = AccountGroup("All".to_string());
     let tags = [
         "NetLiquidation",
@@ -67,6 +71,9 @@ pub fn read_margin(client: &Client) -> Result<MarginInfo, String> {
     for item in &sub {
         match item {
             AccountSummaryResult::Summary(s) => {
+                if s.account != account {
+                    continue;
+                }
                 let v = s.value.parse::<f64>().unwrap_or(0.0);
                 match s.tag.as_str() {
                     "NetLiquidation" => m.net_liq = v,
@@ -85,11 +92,28 @@ pub fn read_margin(client: &Client) -> Result<MarginInfo, String> {
     Ok(m)
 }
 
-/// Place a single order described by side/qty/kind. `qty` must be a positive whole
-/// share count. Returns the assigned order id.
+/// Build a stock order pinned to `account`.
+#[allow(clippy::too_many_arguments)]
+fn build_order(account: &str, side: Side, qty: f64, kind: OrderKind, limit_price: f64, aux_price: f64) -> Order {
+    Order {
+        action: match side {
+            Side::Buy => Action::Buy,
+            Side::Sell => Action::Sell,
+        },
+        order_type: kind.as_ib().to_string(),
+        total_quantity: qty,
+        limit_price: matches!(kind, OrderKind::Limit | OrderKind::StopLimit).then_some(limit_price),
+        aux_price: matches!(kind, OrderKind::Stop | OrderKind::StopLimit).then_some(aux_price),
+        account: account.to_string(),
+        ..Default::default()
+    }
+}
+
+/// Place a single order on `account`. `qty` must be a positive whole share count.
 #[allow(clippy::too_many_arguments)]
 pub fn place_order(
     client: &Client,
+    account: &str,
     symbol: &str,
     currency: &str,
     exchange: &str,
@@ -103,34 +127,22 @@ pub fn place_order(
         .in_currency(currency)
         .on_exchange(exchange)
         .build();
-
-    let qb = client.order(&contract);
-    let sized = match side {
-        Side::Buy => qb.buy(qty),
-        Side::Sell => qb.sell(qty),
-    };
-    let result = match kind {
-        OrderKind::Market => sized.market().submit(),
-        OrderKind::Limit => sized.limit(limit_price).submit(),
-        OrderKind::Stop => sized.stop(aux_price).submit(),
-        OrderKind::StopLimit => sized.stop_limit(aux_price, limit_price).submit(),
-    };
-    result.map(|_| ()).map_err(|e| e.to_string())
+    let order = build_order(account, side, qty, kind, limit_price, aux_price);
+    let id = client.next_order_id();
+    client.submit_order(id, &contract, &order).map_err(|e| e.to_string())
 }
 
-/// Cancel every working order in the account.
-pub fn cancel_all(client: &Client) -> Result<(), String> {
-    client.global_cancel().map_err(|e| e.to_string())
-}
-
-/// Read this client's own resting limit/stop/stop-limit orders, paired with their order
-/// ids (so stale mirrors can be cancelled). Scoped to this API client id, so it never
-/// returns the user's manual TWS orders.
-pub fn read_open_orders(client: &Client) -> Result<Vec<(i32, WorkingOrder)>, String> {
+/// Read this client's own resting limit/stop/stop-limit orders **for `account`**, paired
+/// with their order ids (so stale mirrors can be cancelled). Scoped to this API client id
+/// AND the target account.
+pub fn read_open_orders(client: &Client, account: &str) -> Result<Vec<(i32, WorkingOrder)>, String> {
     let sub = client.open_orders().map_err(|e| e.to_string())?;
     let mut out: Vec<(i32, WorkingOrder)> = Vec::new();
     for item in &sub {
         if let Orders::OrderData(d) = item {
+            if d.order.account != account {
+                continue;
+            }
             let kind = OrderKind::from_ib(&d.order.order_type);
             if matches!(kind, OrderKind::Market) {
                 continue;
@@ -173,6 +185,7 @@ pub fn cancel_order(client: &Client, order_id: i32) -> Result<(), String> {
 #[allow(clippy::too_many_arguments)]
 pub fn what_if_init_margin(
     client: &Client,
+    account: &str,
     symbol: &str,
     currency: &str,
     exchange: &str,
@@ -183,18 +196,8 @@ pub fn what_if_init_margin(
     aux_price: f64,
 ) -> Result<f64, String> {
     let contract = Contract::stock(symbol).in_currency(currency).on_exchange(exchange).build();
-    let order = Order {
-        action: match side {
-            Side::Buy => Action::Buy,
-            Side::Sell => Action::Sell,
-        },
-        order_type: kind.as_ib().to_string(),
-        total_quantity: qty,
-        limit_price: matches!(kind, OrderKind::Limit | OrderKind::StopLimit).then_some(limit_price),
-        aux_price: matches!(kind, OrderKind::Stop | OrderKind::StopLimit).then_some(aux_price),
-        what_if: true,
-        ..Default::default()
-    };
+    let mut order = build_order(account, side, qty, kind, limit_price, aux_price);
+    order.what_if = true;
     let order_id = client.next_order_id();
     let sub = client.place_order(order_id, &contract, &order).map_err(|e| e.to_string())?;
 

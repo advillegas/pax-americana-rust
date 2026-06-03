@@ -67,12 +67,42 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         }
     };
 
-    let account = client
-        .managed_accounts()
-        .ok()
-        .and_then(|a| a.into_iter().next())
-        .unwrap_or_default();
-    let baseline = ib::read_margin(&client).map(|m| m.net_liq).unwrap_or(0.0);
+    // Resolve EXACTLY ONE account to operate on. If the login manages several and none is
+    // configured, refuse to trade — never act across accounts (which could touch/flatten
+    // positions in an account the operator didn't intend).
+    let accounts = client.managed_accounts().unwrap_or_default();
+    let configured = state.controls.lock().ib_account.trim().to_string();
+    let account = if !configured.is_empty() {
+        if accounts.iter().any(|a| a == &configured) {
+            configured
+        } else {
+            let avail = if accounts.is_empty() { "none".to_string() } else { accounts.join(", ") };
+            state.log(LogLevel::Err, format!("Account '{configured}' not on this login (available: {avail}). Stopping."));
+            state.running.store(false, Ordering::Relaxed);
+            return;
+        }
+    } else {
+        match accounts.len() {
+            1 => accounts[0].clone(),
+            0 => {
+                state.log(LogLevel::Err, "No account available on this login. Stopping.");
+                state.running.store(false, Ordering::Relaxed);
+                return;
+            }
+            _ => {
+                state.log(
+                    LogLevel::Err,
+                    format!(
+                        "This login manages multiple accounts ({}). Set the Account field to choose one — refusing to trade across accounts.",
+                        accounts.join(", ")
+                    ),
+                );
+                state.running.store(false, Ordering::Relaxed);
+                return;
+            }
+        }
+    };
+    let baseline = ib::read_margin(&client, &account).map(|m| m.net_liq).unwrap_or(0.0);
     state.log(LogLevel::Ok, format!("IB connected ✓ account={account}  balance=${baseline:.2}"));
     state.with_status(|s| {
         s.connected = true;
@@ -94,11 +124,11 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
     while state.is_running() {
         // ── one-shot Close All request ───────────────────────────────────────
         if state.close_all.swap(false, Ordering::Relaxed) {
-            do_close_all(&client, state);
+            do_close_all(&client, state, &account);
         }
 
         // ── balance + margin/SMA + drawdown guards ───────────────────────────
-        let margin = ib::read_margin(&client).unwrap_or_default();
+        let margin = ib::read_margin(&client, &account).unwrap_or_default();
         let client_balance = margin.net_liq;
         let max_dd = state.controls.lock().max_drawdown_pct;
         // SMA < 0 is a Reg-T / Fed call — block ALL opening regardless of buying power.
@@ -147,7 +177,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         };
 
         // ── read our own positions ───────────────────────────────────────────
-        let client_positions = match ib::read_positions(&client) {
+        let client_positions = match ib::read_positions(&client, &account) {
             Ok(p) => p,
             Err(e) => {
                 state.log(LogLevel::Warn, format!("Position read failed: {e} — reconnecting"));
@@ -191,7 +221,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
 
         // ── Channel 1: mirror the master's resting limit/stop orders ───────────
         let desired = desired_working_orders(&snap.working_orders, &sizing, long_only, &client_positions);
-        let current_working = ib::read_open_orders(&client).unwrap_or_default();
+        let current_working = ib::read_open_orders(&client, &account).unwrap_or_default();
         let current_wo: Vec<pax_core::WorkingOrder> =
             current_working.iter().map(|(_, w)| w.clone()).collect();
         let wdiff = diff_working_orders(&desired, &current_wo);
@@ -209,7 +239,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             // Protective orders (stops/limits that reduce risk) still go through.
             if w.is_entry
                 && !open_allowed(
-                    &client, state, &w.symbol, &w.currency, &w.exchange, w.side, w.quantity, w.kind,
+                    &client, state, &account, &w.symbol, &w.currency, &w.exchange, w.side, w.quantity, w.kind,
                     w.limit_price, w.aux_price, sma_call, &mut projected_available,
                 )
             {
@@ -221,7 +251,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
                 }
             }
             match ib::place_order(
-                &client, &w.symbol, &w.currency, &w.exchange, w.side, w.quantity, w.kind, w.limit_price, w.aux_price,
+                &client, &account, &w.symbol, &w.currency, &w.exchange, w.side, w.quantity, w.kind, w.limit_price, w.aux_price,
             ) {
                 Ok(()) => {
                     wo_cooldown.insert(w.key(), Instant::now());
@@ -274,7 +304,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
                 // allow reduces/closes/flattens (they free margin).
                 if is_opening(intent.reason)
                     && !open_allowed(
-                        &client, state, &intent.symbol, &intent.currency, &intent.exchange,
+                        &client, state, &account, &intent.symbol, &intent.currency, &intent.exchange,
                         intent.side, intent.qty, intent.kind, intent.limit_price, intent.aux_price,
                         sma_call, &mut projected_available,
                     )
@@ -300,6 +330,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
                 }
                 match ib::place_order(
                     &client,
+                    &account,
                     &intent.symbol,
                     &intent.currency,
                     &intent.exchange,
@@ -347,12 +378,16 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
     state.log(LogLevel::Warn, "Engine session ended.");
 }
 
-fn do_close_all(client: &Client, state: &Arc<SharedState>) {
+fn do_close_all(client: &Client, state: &Arc<SharedState>, account: &str) {
     state.log(LogLevel::Warn, "CLOSE ALL — cancelling working orders and flattening positions…");
-    if let Err(e) = ib::cancel_all(client) {
-        state.log(LogLevel::Warn, format!("Cancel-all warning: {e}"));
+    // Cancel only THIS account's working orders (never a blanket global cancel that could
+    // touch other accounts on the login).
+    for (id, w) in ib::read_open_orders(client, account).unwrap_or_default() {
+        if let Err(e) = ib::cancel_order(client, id) {
+            state.log(LogLevel::Warn, format!("Cancel warning {}: {e}", w.symbol));
+        }
     }
-    let positions = ib::read_positions(client).unwrap_or_default();
+    let positions = ib::read_positions(client, account).unwrap_or_default();
     if positions.is_empty() {
         state.log(LogLevel::Ok, "Close all — no open positions.");
         return;
@@ -362,6 +397,7 @@ fn do_close_all(client: &Client, state: &Arc<SharedState>) {
         let qty = p.net_qty.abs();
         match ib::place_order(
             client,
+            account,
             &p.symbol,
             &p.currency,
             &p.exchange,
@@ -408,6 +444,7 @@ fn is_opening(reason: IntentReason) -> bool {
 fn open_allowed(
     client: &Client,
     state: &Arc<SharedState>,
+    account: &str,
     symbol: &str,
     currency: &str,
     exchange: &str,
@@ -422,7 +459,7 @@ fn open_allowed(
     if sma_call {
         return false;
     }
-    match ib::what_if_init_margin(client, symbol, currency, exchange, side, qty, kind, limit_price, aux_price) {
+    match ib::what_if_init_margin(client, account, symbol, currency, exchange, side, qty, kind, limit_price, aux_price) {
         Ok(init_margin) => {
             if *projected_available - init_margin < 0.0 {
                 state.log(

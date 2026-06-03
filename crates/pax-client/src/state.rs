@@ -78,6 +78,9 @@ pub struct Controls {
     pub ib_host: String,
     pub ib_port_live: u16,
     pub ib_port_paper: u16,
+    /// IBKR account id to operate on. Blank = use the sole account; required (refuses to
+    /// trade) if the login manages more than one account.
+    pub ib_account: String,
     /// Master HTTP URL the client polls (editable in the GUI; applied on START).
     pub master_url: String,
 }
@@ -95,6 +98,7 @@ impl Default for Controls {
             ib_host: "127.0.0.1".to_string(),
             ib_port_live: 4001,
             ib_port_paper: 4002,
+            ib_account: String::new(),
             master_url: "http://148.113.203.188:5001".to_string(),
         }
     }

@@ -14,6 +14,8 @@ pub struct ClientConfig {
     pub ib_port_live: u16,
     /// Paper port (IB Gateway 4002 / TWS 7497).
     pub ib_port_paper: u16,
+    /// IBKR account id (blank = sole account; required when the login has several).
+    pub ib_account: String,
     /// Seconds between reconciliation passes.
     pub sync_interval_secs: u64,
     /// After placing an order for a symbol, suppress further orders for it for this
@@ -29,6 +31,7 @@ impl Default for ClientConfig {
             ib_host: "127.0.0.1".to_string(),
             ib_port_live: 4001,
             ib_port_paper: 4002,
+            ib_account: String::new(),
             sync_interval_secs: 2,
             order_cooldown_secs: 10,
         }
@@ -50,6 +53,7 @@ impl ClientConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(d.ib_port_paper),
+            ib_account: env::var("PAX_IB_ACCOUNT").unwrap_or(d.ib_account),
             sync_interval_secs: env::var("PAX_SYNC_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
