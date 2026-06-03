@@ -11,12 +11,14 @@
 //! master itself is genuinely net short.
 
 pub mod model;
+pub mod orders;
 pub mod protocol;
 pub mod reconcile;
 pub mod sizing;
 pub mod theme;
 
-pub use model::{OrderKind, Position, Side};
+pub use model::{OrderKind, Position, Side, WorkingOrder};
+pub use orders::{desired_working_orders, diff_working_orders, effective_positions, WorkingDiff};
 pub use protocol::{MasterSnapshot, PROTOCOL_SCHEMA};
 pub use reconcile::{reconcile, IntentReason, ReconcileInput, ReconcileResult, SkipNote, TradeIntent};
 pub use sizing::{round_qty, target_net_qty, SizingParams};

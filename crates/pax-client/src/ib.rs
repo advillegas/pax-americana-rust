@@ -4,7 +4,8 @@ use ibapi::accounts::types::AccountGroup;
 use ibapi::accounts::{AccountSummaryResult, PositionUpdate};
 use ibapi::client::blocking::Client;
 use ibapi::contracts::Contract;
-use pax_core::{OrderKind, Position, Side};
+use ibapi::orders::{Action, Orders};
+use pax_core::{OrderKind, Position, Side, WorkingOrder};
 
 /// Snapshot the client's net positions (drains until `PositionEnd`).
 pub fn read_positions(client: &Client) -> Result<Vec<Position>, String> {
@@ -91,6 +92,50 @@ pub fn place_order(
 /// Cancel every working order in the account.
 pub fn cancel_all(client: &Client) -> Result<(), String> {
     client.global_cancel().map_err(|e| e.to_string())
+}
+
+/// Read this client's own resting limit/stop/stop-limit orders, paired with their order
+/// ids (so stale mirrors can be cancelled). Scoped to this API client id, so it never
+/// returns the user's manual TWS orders.
+pub fn read_open_orders(client: &Client) -> Result<Vec<(i32, WorkingOrder)>, String> {
+    let sub = client.open_orders().map_err(|e| e.to_string())?;
+    let mut out: Vec<(i32, WorkingOrder)> = Vec::new();
+    for item in &sub {
+        if let Orders::OrderData(d) = item {
+            let kind = OrderKind::from_ib(&d.order.order_type);
+            if matches!(kind, OrderKind::Market) {
+                continue;
+            }
+            let side = match d.order.action {
+                Action::Buy => Side::Buy,
+                _ => Side::Sell,
+            };
+            let qty = d.order.total_quantity.abs();
+            if qty == 0.0 {
+                continue;
+            }
+            out.push((
+                d.order_id,
+                WorkingOrder {
+                    symbol: d.contract.symbol.to_string(),
+                    currency: nonempty(d.contract.currency.to_string(), "USD"),
+                    exchange: nonempty(d.contract.exchange.to_string(), "SMART"),
+                    side,
+                    quantity: qty,
+                    kind,
+                    limit_price: d.order.limit_price.unwrap_or(0.0),
+                    aux_price: d.order.aux_price.unwrap_or(0.0),
+                    is_entry: false,
+                },
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// Cancel a single order by id.
+pub fn cancel_order(client: &Client, order_id: i32) -> Result<(), String> {
+    client.cancel_order(order_id, "").map(|_| ()).map_err(|e| e.to_string())
 }
 
 fn nonempty(s: String, fallback: &str) -> String {

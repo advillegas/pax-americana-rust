@@ -46,7 +46,8 @@ impossible.
   streaming position subscription** (TWS pushes changes in real time, ~200ms), tracks net
   positions and balance, and serves an authoritative JSON snapshot over HTTP. Themed GUI.
 * **`crates/pax-client`** — connects to its own IB Gateway/TWS, polls the master, and
-  reconciles its book to a proportionally-scaled copy of the master's structure.
+  reconciles its book to a proportionally-scaled copy of the master's structure. It also
+  mirrors the master's resting limit/stop orders (see below).
 
 ---
 
@@ -79,6 +80,27 @@ Global safety guards refuse to trade when:
 See `crates/pax-core/src/reconcile.rs` and its tests (`cargo test -p pax-core`).
 
 ---
+
+## Order types (limit / stop mirroring)
+
+The client uses the same, more efficient order types the master uses — not just market
+orders — via two coordinated channels:
+
+* **Working-order mirror.** The master broadcasts its resting **limit / stop / stop-limit**
+  orders. The client places proportionally-scaled copies with the *same type and prices*,
+  and cancels its own mirrors when the master's disappear. So a master limit-buy becomes a
+  client limit-buy; a master protective stop becomes a client protective stop.
+* **Position safety net.** The reconciliation engine still guarantees the client's *net
+  positions* track the master, using **market** orders only to correct genuine drift
+  (e.g. the master filled and the client missed, or an orphan needs closing).
+
+To avoid the two channels fighting, the master tags each working order as an **entry**
+(opens/adds exposure) or **protective** (a stop/limit closing part of an existing
+position). The safety net folds only *entry* orders into its target exposure, so it never
+market-fills something a resting limit will cover, while protective stops simply ride
+alongside the position they guard. Reductions and orphan closes always use market orders
+to guarantee the exit. Market is the fallback whenever the master holds a position with no
+working order behind it.
 
 ## Risk controls
 

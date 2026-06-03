@@ -6,10 +6,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::Position;
+use crate::model::{Position, WorkingOrder};
 
 /// Bump when the snapshot shape changes incompatibly.
-pub const PROTOCOL_SCHEMA: u32 = 1;
+pub const PROTOCOL_SCHEMA: u32 = 2;
 
 /// Full, self-contained view of the master account at a point in time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +24,9 @@ pub struct MasterSnapshot {
     pub balance: f64,
     /// Net positions per symbol (signed quantities).
     pub positions: Vec<Position>,
+    /// Resting limit/stop/stop-limit orders the client should mirror.
+    #[serde(default)]
+    pub working_orders: Vec<WorkingOrder>,
     /// Unix epoch millis when this snapshot was generated.
     pub generated_at_ms: u64,
 }
@@ -36,6 +39,7 @@ impl Default for MasterSnapshot {
             account: String::new(),
             balance: 0.0,
             positions: Vec::new(),
+            working_orders: Vec::new(),
             generated_at_ms: 0,
         }
     }

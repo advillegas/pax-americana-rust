@@ -14,13 +14,16 @@ use std::time::{Duration, Instant};
 use ibapi::accounts::types::AccountGroup;
 use ibapi::accounts::{AccountSummaryResult, PositionUpdate};
 use ibapi::client::blocking::Client;
-use pax_core::{MasterSnapshot, OrderKind, Position, PROTOCOL_SCHEMA};
+use ibapi::orders::{Action, Orders};
+use pax_core::{MasterSnapshot, OrderKind, Position, WorkingOrder, PROTOCOL_SCHEMA};
 
 use crate::config::MasterConfig;
 use crate::state::{now_ms, LogLevel, SharedState};
 
 /// How often to refresh NetLiquidation (positions stream in real time independently).
 const BALANCE_REFRESH_SECS: u64 = 5;
+/// How often to poll working (resting) orders.
+const ORDERS_REFRESH_MS: u64 = 1000;
 /// How often to republish the snapshot (keeps `generated_at_ms` fresh for liveness).
 const REPUBLISH_MS: u64 = 200;
 
@@ -73,7 +76,11 @@ fn worker_loop(cfg: MasterConfig, state: Arc<SharedState>, stop: Arc<AtomicBool>
 
         let mut book: BTreeMap<String, Position> = BTreeMap::new();
         let mut balance = read_balance(&client).unwrap_or(0.0);
+        let mut working: Vec<WorkingOrder> = Vec::new();
         let mut last_balance = Instant::now();
+        let mut last_orders = Instant::now()
+            .checked_sub(Duration::from_millis(ORDERS_REFRESH_MS))
+            .unwrap_or_else(Instant::now);
 
         // Steady-state event loop.
         loop {
@@ -122,6 +129,14 @@ fn worker_loop(cfg: MasterConfig, state: Arc<SharedState>, stop: Arc<AtomicBool>
                 last_balance = Instant::now();
             }
 
+            // Periodic working-order capture.
+            if last_orders.elapsed() >= Duration::from_millis(ORDERS_REFRESH_MS) {
+                if let Ok(w) = read_working_orders(&client, &book) {
+                    working = w;
+                }
+                last_orders = Instant::now();
+            }
+
             // Republish the snapshot (cheap; keeps liveness timestamp fresh).
             {
                 let mut snap = state.snapshot.lock();
@@ -131,6 +146,7 @@ fn worker_loop(cfg: MasterConfig, state: Arc<SharedState>, stop: Arc<AtomicBool>
                     account: account.clone(),
                     balance,
                     positions: book.values().cloned().collect(),
+                    working_orders: working.clone(),
                     generated_at_ms: now_ms(),
                 };
             }
@@ -170,6 +186,52 @@ fn read_balance(client: &Client) -> Result<f64, String> {
         }
     }
     Ok(balance)
+}
+
+/// Snapshot the master's resting limit/stop/stop-limit orders, tagging each as an entry
+/// (opens/adds exposure) or protective (reduces an existing position) using `book`.
+fn read_working_orders(
+    client: &Client,
+    book: &BTreeMap<String, Position>,
+) -> Result<Vec<WorkingOrder>, String> {
+    let sub = client.all_open_orders().map_err(|e| e.to_string())?;
+    let mut out: Vec<WorkingOrder> = Vec::new();
+    for item in &sub {
+        if let Orders::OrderData(d) = item {
+            let kind = OrderKind::from_ib(&d.order.order_type);
+            // Only resting order types are worth mirroring; skip market/other.
+            if matches!(kind, OrderKind::Market) {
+                continue;
+            }
+            let side = match d.order.action {
+                Action::Buy => pax_core::Side::Buy,
+                _ => pax_core::Side::Sell,
+            };
+            let qty = d.order.total_quantity.abs();
+            if qty == 0.0 {
+                continue;
+            }
+            let signed = match side {
+                pax_core::Side::Buy => qty,
+                pax_core::Side::Sell => -qty,
+            };
+            let pos = book.get(&d.contract.symbol.to_string()).map(|p| p.net_qty).unwrap_or(0.0);
+            let is_entry = pos == 0.0 || pos.signum() == signed.signum();
+
+            out.push(WorkingOrder {
+                symbol: d.contract.symbol.to_string(),
+                currency: nonempty(d.contract.currency.to_string(), "USD"),
+                exchange: nonempty(d.contract.exchange.to_string(), "SMART"),
+                side,
+                quantity: qty,
+                kind,
+                limit_price: d.order.limit_price.unwrap_or(0.0),
+                aux_price: d.order.aux_price.unwrap_or(0.0),
+                is_entry,
+            });
+        }
+    }
+    Ok(out)
 }
 
 /// Sleep up to `secs`, waking early (every 250ms) if the stop flag is set.

@@ -12,7 +12,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ibapi::client::blocking::Client;
-use pax_core::{reconcile, IntentReason, ReconcileInput, Side, SizingParams};
+use pax_core::{
+    desired_working_orders, diff_working_orders, effective_positions, reconcile, IntentReason,
+    ReconcileInput, Side, SizingParams,
+};
 
 use crate::config::{stable_client_id, ClientConfig};
 use crate::ib;
@@ -75,6 +78,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>, api: &MasterApi) {
     });
 
     let mut cooldown: HashMap<String, Instant> = HashMap::new();
+    let mut wo_cooldown: HashMap<String, Instant> = HashMap::new();
     let mut drawdown_hit = false;
     let mut last_unreachable_warn: Option<Instant> = None;
     let cooldown_dur = Duration::from_secs(cfg.order_cooldown_secs);
@@ -148,7 +152,6 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>, api: &MasterApi) {
             continue;
         }
 
-        // ── reconcile + act ──────────────────────────────────────────────────
         let sizing = SizingParams {
             multiplier: controls.multiplier,
             master_balance: snap.balance,
@@ -157,12 +160,62 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>, api: &MasterApi) {
             max_position_qty: controls.max_position_qty,
             force_min_one: true,
         };
+        let long_only = controls.trade_mode == TradeMode::LongOnly;
+
+        // ── Channel 1: mirror the master's resting limit/stop orders ───────────
+        let desired = desired_working_orders(&snap.working_orders, &sizing, long_only, &client_positions);
+        let current_working = ib::read_open_orders(&client).unwrap_or_default();
+        let current_wo: Vec<pax_core::WorkingOrder> =
+            current_working.iter().map(|(_, w)| w.clone()).collect();
+        let wdiff = diff_working_orders(&desired, &current_wo);
+
+        for key in &wdiff.to_cancel {
+            if let Some((id, w)) = current_working.iter().find(|(_, w)| &w.key() == key) {
+                match ib::cancel_order(&client, *id) {
+                    Ok(()) => state.log(LogLevel::Warn, format!("Cancel mirror order {} {}", w.side.as_ib(), w.symbol)),
+                    Err(e) => state.log(LogLevel::Err, format!("Cancel failed {}: {e}", w.symbol)),
+                }
+            }
+        }
+        for w in &wdiff.to_place {
+            if let Some(t) = wo_cooldown.get(&w.key()) {
+                if t.elapsed() < cooldown_dur {
+                    continue;
+                }
+            }
+            match ib::place_order(
+                &client, &w.symbol, &w.currency, &w.exchange, w.side, w.quantity, w.kind, w.limit_price, w.aux_price,
+            ) {
+                Ok(()) => {
+                    wo_cooldown.insert(w.key(), Instant::now());
+                    state.with_status(|s| s.orders_placed += 1);
+                    let lvl = if w.side == Side::Buy { LogLevel::Buy } else { LogLevel::Sell };
+                    let px = if w.kind == pax_core::OrderKind::Limit { w.limit_price } else { w.aux_price };
+                    state.log(
+                        lvl,
+                        format!("{:<4} {:<6} qty={:.0} {} @ {:.2} [mirror]", w.side.as_ib(), w.symbol, w.quantity, w.kind.as_ib(), px),
+                    );
+                }
+                Err(e) => {
+                    state.with_status(|s| s.orders_failed += 1);
+                    state.log(LogLevel::Err, format!("Mirror order failed {}: {e}", w.symbol));
+                }
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+
+        // ── Channel 2: position safety net on EFFECTIVE exposure ───────────────
+        // Effective exposure folds *entry* working orders into positions so the safety
+        // net won't market-fill what a resting limit order will cover; protective orders
+        // ride alongside their position. Market orders here only correct genuine drift.
+        let master_eff = effective_positions(&snap.positions, &snap.working_orders);
+        let client_eff = effective_positions(&client_positions, &desired);
         let input = ReconcileInput {
-            master: &snap.positions,
-            client: &client_positions,
+            master: &master_eff,
+            client: &client_eff,
             master_connected: snap.connected,
             sizing,
-            long_only: controls.trade_mode == TradeMode::LongOnly,
+            long_only,
             split_zero_cross: true,
             empty_master_guard: 2,
         };
