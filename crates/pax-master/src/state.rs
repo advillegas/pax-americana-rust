@@ -49,21 +49,66 @@ impl LogBuffer {
 }
 
 /// Everything the GUI, IB worker, and HTTP server share.
+/// Which IBKR endpoint the master connects to. Toggleable at runtime in the GUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IbMode {
+    Live,
+    Paper,
+}
+
+impl IbMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            IbMode::Live => "LIVE",
+            IbMode::Paper => "PAPER",
+        }
+    }
+}
+
 pub struct SharedState {
     pub snapshot: Mutex<MasterSnapshot>,
     pub log: Mutex<LogBuffer>,
-    pub endpoint: String,
     pub http_bind: String,
+    pub host: String,
+    pub port_live: u16,
+    pub port_paper: u16,
+    /// Current connection mode — the GUI writes it, the IB worker reads it and
+    /// reconnects to the matching port when it changes.
+    pub mode: Mutex<IbMode>,
 }
 
 impl SharedState {
-    pub fn new(endpoint: String, http_bind: String) -> Arc<Self> {
+    pub fn new(
+        host: String,
+        port_live: u16,
+        port_paper: u16,
+        http_bind: String,
+        start_mode: IbMode,
+    ) -> Arc<Self> {
         Arc::new(SharedState {
             snapshot: Mutex::new(MasterSnapshot::default()),
             log: Mutex::new(LogBuffer::default()),
-            endpoint,
             http_bind,
+            host,
+            port_live,
+            port_paper,
+            mode: Mutex::new(start_mode),
         })
+    }
+
+    pub fn mode(&self) -> IbMode {
+        *self.mode.lock()
+    }
+
+    pub fn port(&self) -> u16 {
+        match self.mode() {
+            IbMode::Live => self.port_live,
+            IbMode::Paper => self.port_paper,
+        }
+    }
+
+    pub fn endpoint(&self) -> String {
+        format!("{}:{}", self.host, self.port())
     }
 
     pub fn log(&self, level: LogLevel, msg: impl Into<String>) {

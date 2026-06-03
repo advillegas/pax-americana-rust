@@ -26,7 +26,13 @@ fn main() -> eframe::Result<()> {
         .init();
 
     let cfg = MasterConfig::from_env();
-    let state = SharedState::new(cfg.ib_endpoint(), cfg.http_bind.clone());
+    let state = SharedState::new(
+        cfg.ib_host.clone(),
+        cfg.ib_port_live,
+        cfg.ib_port_paper,
+        cfg.http_bind.clone(),
+        cfg.start_mode,
+    );
 
     // Background workers.
     server::spawn(cfg.http_bind.clone(), cfg.api_key.clone(), state.clone());

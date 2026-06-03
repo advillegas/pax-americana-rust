@@ -36,13 +36,18 @@ pub fn spawn(cfg: MasterConfig, state: Arc<SharedState>) -> Arc<AtomicBool> {
 }
 
 fn worker_loop(cfg: MasterConfig, state: Arc<SharedState>, stop: Arc<AtomicBool>) {
-    let endpoint = cfg.ib_endpoint();
-    let _ = cfg.refresh_secs; // balance cadence is fixed; positions are event-driven now
-
     while !stop.load(Ordering::Relaxed) {
+        // Endpoint + mode are read fresh each attempt so the GUI's Live/Paper toggle
+        // takes effect on (re)connect.
+        let connected_mode = state.mode();
+        let endpoint = state.endpoint();
         state.log(
             LogLevel::Info,
-            format!("Connecting to IB at {endpoint} (clientId={})…", cfg.ib_client_id),
+            format!(
+                "Connecting to IB at {endpoint} [{}] (clientId={})…",
+                connected_mode.label(),
+                cfg.ib_client_id
+            ),
         );
 
         let client = match Client::connect(&endpoint, cfg.ib_client_id) {
@@ -86,6 +91,16 @@ fn worker_loop(cfg: MasterConfig, state: Arc<SharedState>, stop: Arc<AtomicBool>
         loop {
             if stop.load(Ordering::Relaxed) {
                 return;
+            }
+
+            // Operator flipped Live/Paper — drop this connection and reconnect to the
+            // new port.
+            if state.mode() != connected_mode {
+                state.log(
+                    LogLevel::Warn,
+                    format!("Mode switched to {} — reconnecting…", state.mode().label()),
+                );
+                break;
             }
 
             // Drain all pending position updates without blocking.

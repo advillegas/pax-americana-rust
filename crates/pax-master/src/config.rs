@@ -2,12 +2,18 @@
 
 use std::env;
 
+use crate::state::IbMode;
+
 #[derive(Debug, Clone)]
 pub struct MasterConfig {
     /// IB Gateway / TWS host. Use 127.0.0.1 (never `localhost` — TWS blocks IPv6).
     pub ib_host: String,
-    /// IB Gateway: 4001 (live) / 4002 (paper). TWS: 7496 (live) / 7497 (paper).
-    pub ib_port: u16,
+    /// Live port (IB Gateway 4001 / TWS 7496).
+    pub ib_port_live: u16,
+    /// Paper port (IB Gateway 4002 / TWS 7497).
+    pub ib_port_paper: u16,
+    /// Which mode to start in (toggleable at runtime in the GUI).
+    pub start_mode: IbMode,
     /// clientId 0 sees all manually-placed orders/positions in the session.
     pub ib_client_id: i32,
     /// Address the HTTP API binds to.
@@ -22,7 +28,9 @@ impl Default for MasterConfig {
     fn default() -> Self {
         MasterConfig {
             ib_host: "127.0.0.1".to_string(),
-            ib_port: 4002,
+            ib_port_live: 4001,
+            ib_port_paper: 4002,
+            start_mode: IbMode::Paper,
             ib_client_id: 0,
             http_bind: "0.0.0.0:5001".to_string(),
             api_key: String::new(),
@@ -34,12 +42,24 @@ impl Default for MasterConfig {
 impl MasterConfig {
     pub fn from_env() -> Self {
         let d = MasterConfig::default();
+        // Legacy PAX_IB_PORT (single port) still honored as the paper-port default.
+        let legacy_port = env::var("PAX_IB_PORT").ok().and_then(|v| v.parse().ok());
+        let start_mode = match env::var("PAX_IB_MODE").unwrap_or_default().to_lowercase().as_str() {
+            "live" => IbMode::Live,
+            _ => IbMode::Paper,
+        };
         MasterConfig {
             ib_host: env::var("PAX_IB_HOST").unwrap_or(d.ib_host),
-            ib_port: env::var("PAX_IB_PORT")
+            ib_port_live: env::var("PAX_IB_PORT_LIVE")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(d.ib_port),
+                .unwrap_or(d.ib_port_live),
+            ib_port_paper: env::var("PAX_IB_PORT_PAPER")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .or(legacy_port)
+                .unwrap_or(d.ib_port_paper),
+            start_mode,
             ib_client_id: env::var("PAX_IB_CLIENT_ID")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -51,9 +71,5 @@ impl MasterConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(d.refresh_secs),
         }
-    }
-
-    pub fn ib_endpoint(&self) -> String {
-        format!("{}:{}", self.ib_host, self.ib_port)
     }
 }

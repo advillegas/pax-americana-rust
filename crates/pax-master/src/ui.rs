@@ -5,7 +5,7 @@ use std::sync::Arc;
 use eframe::egui::{self, RichText};
 use pax_ui as ui;
 
-use crate::state::{LogLevel, SharedState};
+use crate::state::{IbMode, LogLevel, SharedState};
 
 pub struct MasterApp {
     state: Arc<SharedState>,
@@ -49,13 +49,42 @@ impl eframe::App for MasterApp {
                 uic.horizontal(|uic| {
                     uic.label(RichText::new(format!("API  {}", self.state.http_bind)).color(ui::TEXT_DIM).monospace());
                     uic.separator();
-                    uic.label(RichText::new(format!("IB  {}", self.state.endpoint)).color(ui::TEXT_DIM).monospace());
+                    uic.label(RichText::new(format!("IB  {}", self.state.endpoint())).color(ui::TEXT_DIM).monospace());
                 });
             });
 
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(ui::BG).inner_margin(egui::Margin::same(16)))
             .show(ctx, |uic| {
+                // Connection mode toggle.
+                ui::section(uic, "Connection", |uic| {
+                    let mut mode = self.state.mode.lock();
+                    let before = *mode;
+                    uic.horizontal(|uic| {
+                        uic.label(RichText::new("Account").color(ui::TEXT_DIM));
+                        ui::segmented(uic, &mut *mode, &[(IbMode::Live, "Live"), (IbMode::Paper, "Paper")]);
+                        uic.add_space(10.0);
+                        let (mc, mlabel) = match *mode {
+                            IbMode::Live => (ui::RED, "● LIVE — real funds"),
+                            IbMode::Paper => (ui::GREEN, "● Paper — simulated"),
+                        };
+                        uic.label(RichText::new(mlabel).color(mc).strong());
+                    });
+                    let changed = *mode != before;
+                    drop(mode);
+                    if changed {
+                        self.state.log(LogLevel::Warn, "Mode changed — reconnecting to new port…");
+                    }
+                    uic.label(
+                        RichText::new(format!("Endpoint  {}", self.state.endpoint()))
+                            .color(ui::TEXT_FAINT)
+                            .monospace()
+                            .size(11.0),
+                    );
+                });
+
+                uic.add_space(10.0);
+
                 // Metric tiles.
                 uic.columns(3, |cols| {
                     ui::stat_tile(
