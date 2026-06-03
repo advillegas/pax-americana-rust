@@ -30,4 +30,6 @@ ibapi = { version = "2", default-features = false, features = ["sync"] }
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+# Unwinding (not abort) so a GUI/OpenGL init failure can be caught and fall back to
+# headless mode instead of silently killing the process.
+panic = "unwind"

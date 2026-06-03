@@ -133,8 +133,32 @@ impl SharedState {
     }
 
     pub fn log(&self, level: LogLevel, msg: impl Into<String>) {
+        let msg = msg.into();
+        // Mirror to the console so the master is observable headless and windowed.
+        // Sanitize to ASCII so the Windows console code page doesn't mojibake the dashes.
+        let tag = match level {
+            LogLevel::Ok => "OK  ",
+            LogLevel::Warn => "WARN",
+            LogLevel::Err => "ERR ",
+            LogLevel::Info => "INFO",
+        };
+        println!("[{}] {tag} {}", now_hms(), ascii_console(&msg));
         self.log.lock().push(level, msg);
     }
+}
+
+/// Replace the handful of non-ASCII glyphs we use so console output stays clean.
+pub fn ascii_console(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '—' | '–' => '-',
+            '…' => '~',
+            '✓' => '*',
+            '▍' | '⬢' | '●' => ' ',
+            c if c.is_ascii() => c,
+            _ => '?',
+        })
+        .collect()
 }
 
 pub fn now_hms() -> String {

@@ -148,6 +148,13 @@ netsh advfirewall firewall add rule name="PaxAmericana" dir=in action=allow prot
 ```bash
 pax-master
 ```
+The master runs as a console daemon and opens an optional monitoring GUI. On a headless
+or RDP server with no OpenGL, the GUI can't render — the master detects this, prints a
+notice, and **keeps running headless** (IB worker + HTTP API stay up). To skip the GUI
+explicitly (recommended for servers), run headless:
+```bash
+pax-master --headless        # or set PAX_HEADLESS=1
+```
 Serves: `GET /snapshot` (full structure), `GET /status`, `GET /balance`. When
 `PAX_API_KEY` is set, all endpoints require the `X-API-Key` header.
 
