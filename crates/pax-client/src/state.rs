@@ -141,6 +141,16 @@ impl SharedState {
     }
 
     pub fn log(&self, level: LogLevel, msg: impl Into<String>) {
+        let msg = msg.into();
+        let tag = match level {
+            LogLevel::Ok => "OK  ",
+            LogLevel::Warn => "WARN",
+            LogLevel::Err => "ERR ",
+            LogLevel::Info => "INFO",
+            LogLevel::Buy => "BUY ",
+            LogLevel::Sell => "SELL",
+        };
+        println!("[{}] {tag} {}", now_hms(), ascii_console(&msg));
         self.log.lock().push(level, msg);
     }
 
@@ -148,6 +158,49 @@ impl SharedState {
         let mut s = self.status.lock();
         f(&mut s);
     }
+
+    /// Start the engine (used by both the native GUI and the web panel).
+    pub fn start_engine(&self) {
+        self.with_status(|s| {
+            s.orders_placed = 0;
+            s.orders_closed = 0;
+            s.orders_failed = 0;
+            s.drawdown_hit = false;
+        });
+        self.running.store(true, Ordering::Relaxed);
+        self.log(LogLevel::Info, "START — engine starting.");
+    }
+
+    pub fn stop_engine(&self) {
+        self.running.store(false, Ordering::Relaxed);
+        self.log(LogLevel::Warn, "STOP — engine stopping.");
+    }
+
+    /// Request a one-shot Close All. Returns false (and logs) if not running.
+    pub fn request_close_all(&self) -> bool {
+        if self.is_running() {
+            self.close_all.store(true, Ordering::Relaxed);
+            self.log(LogLevel::Warn, "CLOSE ALL requested.");
+            true
+        } else {
+            self.log(LogLevel::Warn, "Press START before using CLOSE ALL.");
+            false
+        }
+    }
+}
+
+/// Replace the handful of non-ASCII glyphs we use so console output stays clean.
+pub fn ascii_console(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '—' | '–' => '-',
+            '…' => '~',
+            '✓' => '*',
+            '●' | '▍' | '⬢' => ' ',
+            c if c.is_ascii() => c,
+            _ => '?',
+        })
+        .collect()
 }
 
 pub fn now_hms() -> String {

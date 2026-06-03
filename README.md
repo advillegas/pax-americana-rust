@@ -164,11 +164,17 @@ Serves: `GET /snapshot` (full structure), `GET /status`, `GET /balance`. When
 
 **Client server(s):**
 ```bash
-pax-client
+pax-client                   # native GUI if available, else headless + web panel
+pax-client --headless        # skip the native GUI (recommended on a VPS)
 ```
-Pick **Live/Paper**, set the **multiplier** and **max drawdown**, choose **Long & Short**
-or **Long Only**, then press **START**. **CLOSE ALL TRADES** cancels working orders and
-flattens every client position with market orders.
+The client serves a **web control panel** at `http://<host>:5002/` — open it in any
+browser to pick **Live/Paper**, set the **multiplier** / **max drawdown** / trading &
+execution modes, edit the IB host/ports, and **START / STOP / CLOSE ALL**. Like the
+master, it falls back to the web panel when no OpenGL is available. Because the panel can
+place/flatten trades, set **`PAX_PANEL_KEY`** (and restrict `PAX_PANEL_BIND`) whenever it's
+reachable beyond localhost.
+
+The native GUI offers the same controls when a display + OpenGL are present.
 
 ---
 

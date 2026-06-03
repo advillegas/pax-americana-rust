@@ -2445,6 +2445,7 @@ dependencies = [
  "pax-ui",
  "serde",
  "serde_json",
+ "tiny_http",
  "tracing",
  "tracing-subscriber",
  "ureq",

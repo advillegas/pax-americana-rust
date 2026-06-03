@@ -16,5 +16,6 @@ tracing-subscriber = { workspace = true }
 parking_lot = { workspace = true }
 ureq = { workspace = true }
 ibapi = { workspace = true }
+tiny_http = "0.12"
 eframe = "=0.31.1"
 egui = "=0.31.1"

@@ -1,6 +1,5 @@
 //! Client GUI — themed control panel built on the shared pax-ui design system.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use eframe::egui::{self, RichText};
@@ -19,19 +18,11 @@ impl ClientApp {
     }
 
     fn start(&self) {
-        self.state.with_status(|s| {
-            s.orders_placed = 0;
-            s.orders_closed = 0;
-            s.orders_failed = 0;
-            s.drawdown_hit = false;
-        });
-        self.state.running.store(true, Ordering::Relaxed);
-        self.state.log(LogLevel::Info, "START pressed — engine starting.");
+        self.state.start_engine();
     }
 
     fn stop(&self) {
-        self.state.running.store(false, Ordering::Relaxed);
-        self.state.log(LogLevel::Warn, "STOP pressed — engine stopping.");
+        self.state.stop_engine();
     }
 }
 
@@ -151,12 +142,7 @@ impl eframe::App for ClientApp {
                                 }
                             }
                             if ui::warn_button(uic, "CLOSE ALL").clicked() {
-                                if running {
-                                    self.state.close_all.store(true, Ordering::Relaxed);
-                                    self.state.log(LogLevel::Warn, "CLOSE ALL requested.");
-                                } else {
-                                    self.state.log(LogLevel::Warn, "Press START before using CLOSE ALL.");
-                                }
+                                self.state.request_close_all();
                             }
                         });
                         uic.add_space(6.0);
