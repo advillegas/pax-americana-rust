@@ -7,6 +7,7 @@ default-run = "pax-master"
 
 [dependencies]
 pax-core = { path = "../pax-core" }
+pax-ui = { path = "../pax-ui" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

@@ -1,28 +1,40 @@
-//! Pax Americana visual theme — Dark Navy + Fintech Green.
+//! Pax Americana visual theme — refined "ember on slate".
 //!
-//! Exposed as raw `(r, g, b)` tuples so this crate stays GUI-framework-agnostic; the
-//! `eframe`/`egui` apps convert these to `egui::Color32`.
+//! A modern dark fintech palette: deep cool-slate surfaces, a warm ember brand accent
+//! (a nod to Rust), and crisp semantic colors for trading state. Exposed as raw
+//! `(r, g, b)` tuples so this crate stays GUI-framework-agnostic; `pax-ui` converts them
+//! to `egui::Color32` and builds the widget styling on top.
 
 pub type Rgb = (u8, u8, u8);
 
-pub const BG: Rgb = (0x06, 0x0d, 0x1a);
-pub const BG_PANEL: Rgb = (0x0b, 0x16, 0x28);
-pub const BG_INPUT: Rgb = (0x08, 0x12, 0x20);
-pub const BORDER: Rgb = (0x14, 0x22, 0x40);
-pub const ACCENT: Rgb = (0x00, 0xd4, 0xaa);
-pub const GREEN: Rgb = (0x00, 0xe6, 0x8a);
-pub const GREEN_DIM: Rgb = (0x00, 0xb3, 0x6b);
-pub const RED: Rgb = (0xff, 0x4d, 0x6a);
-pub const RED_DIM: Rgb = (0xcc, 0x33, 0x55);
-pub const AMBER: Rgb = (0xff, 0xb3, 0x47);
-pub const TEXT: Rgb = (0xe8, 0xf0, 0xfe);
-pub const TEXT_INPUT: Rgb = (0xa0, 0xff, 0x8a);
-pub const TEXT_DIM: Rgb = (0x8a, 0x9b, 0xbd);
-pub const TEXT_HEADER: Rgb = (0x3d, 0x8a, 0xf7);
-pub const CYAN: Rgb = (0x00, 0xc8, 0xff);
-pub const WHITE: Rgb = (0xff, 0xff, 0xff);
+// ── surfaces ────────────────────────────────────────────────────────────────
+pub const BG: Rgb = (0x0a, 0x0e, 0x16); // app background
+pub const BG_PANEL: Rgb = (0x10, 0x17, 0x23); // raised panel
+pub const BG_ELEV: Rgb = (0x17, 0x21, 0x30); // cards / inputs
+pub const BG_HOVER: Rgb = (0x20, 0x2c, 0x3e); // hovered surface
+pub const BG_INPUT: Rgb = (0x12, 0x1a, 0x28);
 
-pub const BTN_GREEN: Rgb = (0x00, 0xb3, 0x77);
-pub const BTN_GREEN_H: Rgb = (0x00, 0xd4, 0x8f);
-pub const BTN_RED: Rgb = (0xe6, 0x39, 0x56);
-pub const BTN_RED_H: Rgb = (0xff, 0x52, 0x72);
+// ── lines ─────────────────────────────────────────────────────────────────────
+pub const BORDER: Rgb = (0x22, 0x2d, 0x40);
+pub const BORDER_HOVER: Rgb = (0x35, 0x45, 0x60);
+
+// ── text ─────────────────────────────────────────────────────────────────────
+pub const TEXT: Rgb = (0xe9, 0xf0, 0xfb);
+pub const TEXT_DIM: Rgb = (0x90, 0x9f, 0xb7);
+pub const TEXT_FAINT: Rgb = (0x5a, 0x68, 0x80);
+pub const WHITE: Rgb = (0xf5, 0xf9, 0xff);
+
+// ── brand + semantic accents ─────────────────────────────────────────────────
+pub const EMBER: Rgb = (0xff, 0x78, 0x49); // brand / primary highlight
+pub const EMBER_DIM: Rgb = (0xc9, 0x57, 0x2f);
+pub const GREEN: Rgb = (0x34, 0xd3, 0x99); // up / connected / go
+pub const GREEN_DIM: Rgb = (0x1f, 0xa9, 0x7a);
+pub const RED: Rgb = (0xfb, 0x5d, 0x6e); // down / disconnected / stop
+pub const RED_DIM: Rgb = (0xc4, 0x3f, 0x50);
+pub const AMBER: Rgb = (0xf5, 0xb4, 0x54); // warnings / caution
+pub const INFO: Rgb = (0x53, 0xb9, 0xf2); // info / neutral metrics
+pub const CYAN: Rgb = INFO;
+
+// Header/accent label color.
+pub const TEXT_HEADER: Rgb = EMBER;
+pub const ACCENT: Rgb = EMBER;

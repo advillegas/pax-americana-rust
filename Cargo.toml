@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/pax-core",
+    "crates/pax-ui",
     "crates/pax-master",
     "crates/pax-client",
 ]

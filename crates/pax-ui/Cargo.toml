@@ -1,0 +1,9 @@
+[package]
+name = "pax-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pax-core = { path = "../pax-core" }
+egui = "=0.31.1"
