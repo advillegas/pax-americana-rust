@@ -74,9 +74,6 @@ pub struct Controls {
     pub max_drawdown_pct: f64,
     pub max_position_notional: f64,
     pub max_position_qty: f64,
-    /// Minimum IBKR margin cushion (%) to keep before opening/adding. Opens are blocked
-    /// below this; closes/reduces always proceed.
-    pub min_cushion_pct: f64,
     /// IB host/ports (editable in the GUI; applied on the next START).
     pub ib_host: String,
     pub ib_port_live: u16,
@@ -95,7 +92,6 @@ impl Default for Controls {
             max_drawdown_pct: 10.0,
             max_position_notional: 0.0,
             max_position_qty: 0.0,
-            min_cushion_pct: 15.0,
             ib_host: "127.0.0.1".to_string(),
             ib_port_live: 4001,
             ib_port_paper: 4002,

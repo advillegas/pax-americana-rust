@@ -80,7 +80,6 @@ export component ClientWindow inherits Window {
     in-out property <string> drawdown;
     in-out property <string> max_notional;
     in-out property <string> max_qty;
-    in-out property <string> min_cushion;
     in-out property <string> host;
     in-out property <string> live_port;
     in-out property <string> paper_port;
@@ -161,11 +160,9 @@ export component ClientWindow inherits Window {
         HorizontalLayout {
             spacing: 8px;
             Text { text: "Max Pos $"; color: #909fb7; width: 90px; vertical-alignment: center; }
-            LineField { value <=> root.max_notional; width: 90px; }
-            Text { text: "Max Pos Qty"; color: #909fb7; width: 100px; vertical-alignment: center; }
-            LineField { value <=> root.max_qty; width: 90px; }
-            Text { text: "Min Cushion %"; color: #909fb7; width: 110px; vertical-alignment: center; }
-            LineField { value <=> root.min_cushion; width: 70px; }
+            LineField { value <=> root.max_notional; width: 110px; }
+            Text { text: "Max Pos Qty"; color: #909fb7; width: 110px; vertical-alignment: center; }
+            LineField { value <=> root.max_qty; width: 110px; }
             Rectangle { }
         }
         HorizontalLayout {

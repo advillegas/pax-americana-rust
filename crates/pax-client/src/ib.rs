@@ -1,10 +1,12 @@
 //! IB Gateway / TWS integration for the client: reads, and order placement.
 
+use std::time::{Duration, Instant};
+
 use ibapi::accounts::types::AccountGroup;
 use ibapi::accounts::{AccountSummaryResult, PositionUpdate};
 use ibapi::client::blocking::Client;
 use ibapi::contracts::Contract;
-use ibapi::orders::{Action, Orders};
+use ibapi::orders::{Action, Order, Orders, PlaceOrder};
 use pax_core::{OrderKind, Position, Side, WorkingOrder};
 
 /// Snapshot the client's net positions (drains until `PositionEnd`).
@@ -163,6 +165,59 @@ pub fn read_open_orders(client: &Client) -> Result<Vec<(i32, WorkingOrder)>, Str
 /// Cancel a single order by id.
 pub fn cancel_order(client: &Client, order_id: i32) -> Result<(), String> {
     client.cancel_order(order_id, "").map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Ask IBKR (via a what-if order, which is NOT executed) how much **initial margin** this
+/// order would add to the account. Returns that delta in account currency. The caller
+/// uses it to ensure cumulative opening orders stay within buying power.
+#[allow(clippy::too_many_arguments)]
+pub fn what_if_init_margin(
+    client: &Client,
+    symbol: &str,
+    currency: &str,
+    exchange: &str,
+    side: Side,
+    qty: f64,
+    kind: OrderKind,
+    limit_price: f64,
+    aux_price: f64,
+) -> Result<f64, String> {
+    let contract = Contract::stock(symbol).in_currency(currency).on_exchange(exchange).build();
+    let order = Order {
+        action: match side {
+            Side::Buy => Action::Buy,
+            Side::Sell => Action::Sell,
+        },
+        order_type: kind.as_ib().to_string(),
+        total_quantity: qty,
+        limit_price: matches!(kind, OrderKind::Limit | OrderKind::StopLimit).then_some(limit_price),
+        aux_price: matches!(kind, OrderKind::Stop | OrderKind::StopLimit).then_some(aux_price),
+        what_if: true,
+        ..Default::default()
+    };
+    let order_id = client.next_order_id();
+    let sub = client.place_order(order_id, &contract, &order).map_err(|e| e.to_string())?;
+
+    // Poll for the what-if response, bounded so we never hang the engine thread.
+    let start = Instant::now();
+    loop {
+        match sub.try_next() {
+            Some(PlaceOrder::OpenOrder(d)) => {
+                return d
+                    .order_state
+                    .initial_margin_change
+                    .ok_or_else(|| "what-if returned no margin data".to_string());
+            }
+            Some(PlaceOrder::Message(m)) => return Err(m.message),
+            Some(_) => {} // status/other — keep waiting for the OpenOrder
+            None => {
+                if start.elapsed() > Duration::from_secs(4) {
+                    return Err("what-if timed out".to_string());
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        }
+    }
 }
 
 fn nonempty(s: String, fallback: &str) -> String {

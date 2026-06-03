@@ -101,27 +101,19 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         // ── balance + margin/SMA + drawdown guards ───────────────────────────
         let margin = ib::read_margin(&client).unwrap_or_default();
         let client_balance = margin.net_liq;
-        let (max_dd, min_cushion_pct) = {
-            let c = state.controls.lock();
-            (c.max_drawdown_pct, c.min_cushion_pct)
-        };
-        // Block opening/adding when margin is tight: cushion below the floor (when
-        // reported), no excess liquidity, or SMA negative (Reg-T/Fed call). De-risking
-        // (closes/reduces) is always allowed.
-        let opens_blocked = (margin.cushion > 0.0 && margin.cushion * 100.0 < min_cushion_pct)
-            || (margin.net_liq > 0.0 && margin.excess_liquidity <= 0.0)
-            || (margin.sma < 0.0);
-        if opens_blocked {
+        let max_dd = state.controls.lock().max_drawdown_pct;
+        // SMA < 0 is a Reg-T / Fed call — block ALL opening regardless of buying power.
+        // Otherwise each opening order is gated by an exact what-if margin check below.
+        let sma_call = margin.sma < 0.0;
+        // Live buying power for THIS cycle. Each opening order decrements it by its
+        // what-if initial-margin requirement, so cumulative opens can't over-commit.
+        let mut projected_available = margin.available_funds;
+        if sma_call {
             let warn = last_margin_warn.map(|t| t.elapsed() > Duration::from_secs(30)).unwrap_or(true);
             if warn {
                 state.log(
-                    LogLevel::Warn,
-                    format!(
-                        "Margin guard: opens blocked (cushion {:.0}%, excess ${:.0}, SMA ${:.0}) — closes still allowed",
-                        margin.cushion * 100.0,
-                        margin.excess_liquidity,
-                        margin.sma
-                    ),
+                    LogLevel::Err,
+                    format!("SMA negative (${:.0}) — Reg-T call; opens blocked, closes allowed", margin.sma),
                 );
                 last_margin_warn = Some(Instant::now());
             }
@@ -179,7 +171,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             s.excess_liquidity = margin.excess_liquidity;
             s.cushion = margin.cushion;
             s.sma = margin.sma;
-            s.margin_blocks_opens = opens_blocked;
+            s.margin_blocks_opens = sma_call;
         });
 
         if drawdown_hit {
@@ -213,9 +205,14 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             }
         }
         for w in &wdiff.to_place {
-            // Margin guard: don't place entry (opening) orders when margin is tight.
+            // Margin: gate entry (opening) orders against live buying power via what-if.
             // Protective orders (stops/limits that reduce risk) still go through.
-            if opens_blocked && w.is_entry {
+            if w.is_entry
+                && !open_allowed(
+                    &client, state, &w.symbol, &w.currency, &w.exchange, w.side, w.quantity, w.kind,
+                    w.limit_price, w.aux_price, sma_call, &mut projected_available,
+                )
+            {
                 continue;
             }
             if let Some(t) = wo_cooldown.get(&w.key()) {
@@ -273,9 +270,15 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             }
         } else {
             for intent in &result.intents {
-                // Margin guard: skip opening/increasing when margin is tight; always
+                // Margin: gate opening/increasing via what-if buying-power check; always
                 // allow reduces/closes/flattens (they free margin).
-                if opens_blocked && is_opening(intent.reason) {
+                if is_opening(intent.reason)
+                    && !open_allowed(
+                        &client, state, &intent.symbol, &intent.currency, &intent.exchange,
+                        intent.side, intent.qty, intent.kind, intent.limit_price, intent.aux_price,
+                        sma_call, &mut projected_available,
+                    )
+                {
                     continue;
                 }
                 // New-Only mode: skip opening positions the master already held at start.
@@ -394,6 +397,53 @@ fn is_opening(reason: IntentReason) -> bool {
         reason,
         IntentReason::OpenMissing | IntentReason::IncreaseToTarget | IntentReason::OpenLeg
     )
+}
+
+/// Decide whether an opening order may be placed, using an exact IBKR what-if margin
+/// check. `projected_available` is this cycle's running buying power; on approval it is
+/// decremented by the order's initial-margin requirement so cumulative opens stay within
+/// buying power. SMA calls block all opens. If the what-if can't be evaluated, we defer
+/// to IBKR's own real-time rejection rather than falsely halting.
+#[allow(clippy::too_many_arguments)]
+fn open_allowed(
+    client: &Client,
+    state: &Arc<SharedState>,
+    symbol: &str,
+    currency: &str,
+    exchange: &str,
+    side: Side,
+    qty: f64,
+    kind: pax_core::OrderKind,
+    limit_price: f64,
+    aux_price: f64,
+    sma_call: bool,
+    projected_available: &mut f64,
+) -> bool {
+    if sma_call {
+        return false;
+    }
+    match ib::what_if_init_margin(client, symbol, currency, exchange, side, qty, kind, limit_price, aux_price) {
+        Ok(init_margin) => {
+            if *projected_available - init_margin < 0.0 {
+                state.log(
+                    LogLevel::Warn,
+                    format!(
+                        "Margin: skip {} {} qty={:.0} — needs ${:.0} init margin, ${:.0} buying power left",
+                        side.as_ib(),
+                        symbol,
+                        qty,
+                        init_margin,
+                        projected_available.max(0.0)
+                    ),
+                );
+                false
+            } else {
+                *projected_available -= init_margin;
+                true
+            }
+        }
+        Err(_) => true,
+    }
 }
 
 /// Sleep `secs`, but wake promptly (250ms granularity) if the engine is stopped.
