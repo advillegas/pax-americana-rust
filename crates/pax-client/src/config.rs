@@ -24,7 +24,7 @@ pub struct ClientConfig {
 impl Default for ClientConfig {
     fn default() -> Self {
         ClientConfig {
-            master_url: "http://127.0.0.1:5001".to_string(),
+            master_url: "http://148.113.203.188:5001".to_string(),
             master_api_key: String::new(),
             ib_host: "127.0.0.1".to_string(),
             ib_port_live: 4001,

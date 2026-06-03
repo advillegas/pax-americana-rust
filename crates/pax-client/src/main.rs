@@ -58,7 +58,6 @@ fn main() {
         ui.set_host(c.ib_host.clone().into());
         ui.set_live_port(c.ib_port_live.to_string().into());
         ui.set_paper_port(c.ib_port_paper.to_string().into());
-        ui.set_master_url(c.master_url.clone().into());
     }
 
     {
@@ -174,10 +173,6 @@ fn apply_settings(ui: &ClientWindow, state: &SharedState) {
     }
     if let Ok(v) = ui.get_paper_port().trim().parse::<u16>() {
         c.ib_port_paper = v;
-    }
-    let url = ui.get_master_url().trim().to_string();
-    if !url.is_empty() {
-        c.master_url = url;
     }
 }
 

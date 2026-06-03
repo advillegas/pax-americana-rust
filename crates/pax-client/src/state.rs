@@ -95,7 +95,7 @@ impl Default for Controls {
             ib_host: "127.0.0.1".to_string(),
             ib_port_live: 4001,
             ib_port_paper: 4002,
-            master_url: "http://127.0.0.1:5001".to_string(),
+            master_url: "http://148.113.203.188:5001".to_string(),
         }
     }
 }
