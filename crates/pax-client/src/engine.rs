@@ -5,7 +5,7 @@
 //! positions, reconciles them into delta orders via [`pax_core::reconcile`], and submits
 //! those orders — with a per-symbol cooldown so in-flight fills are never double-ordered.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 use ibapi::client::blocking::Client;
 use ibapi::orders::OrderUpdate;
 use pax_core::{
-    desired_working_orders, diff_working_orders, effective_positions, reconcile, IntentReason,
-    ReconcileInput, Side, SizingParams,
+    desired_working_orders, diff_working_orders, effective_positions, reconcile, target_net_qty,
+    IntentReason, Position, ReconcileInput, Side, SizingParams, WorkingOrder,
 };
 
 use crate::config::{stable_client_id, ClientConfig};
@@ -160,6 +160,14 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
     // Symbols the master already held at session start — used by "New Only" mode to
     // suppress opening pre-existing master positions. Captured on first snapshot.
     let mut baseline_symbols: Option<HashSet<String>> = None;
+    // ── Master-change gate state ─────────────────────────────────────────────
+    // The client re-syncs its structure ONLY when the master's ledger changes. Between
+    // changes these locked targets/orders are held so balance/price drift never triggers
+    // a resize (which would rack up commissions). Recomputed proportionally to the CURRENT
+    // balances at the instant the master adjusts.
+    let mut last_fingerprint: Option<String> = None;
+    let mut locked_targets: BTreeMap<String, f64> = BTreeMap::new();
+    let mut locked_desired: Vec<WorkingOrder> = Vec::new();
 
     while state.is_running() {
         // ── periodic license re-check (revocation stops trading) ──────────────
@@ -326,8 +334,35 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         };
         let long_only = controls.trade_mode == TradeMode::LongOnly;
 
+        // ── Master-change gate ────────────────────────────────────────────────
+        // Recompute the desired client structure (target net positions + mirrored working
+        // orders) ONLY when the master's ledger actually changes. Targets are sized
+        // proportionally to the CURRENT balances at that instant, then held — so a matched
+        // book is never resized by mere balance/price drift (the source of commission bleed).
+        if sizing.ratio().is_some() {
+            let fp = master_fingerprint(&snap.positions, &snap.working_orders);
+            if last_fingerprint.as_deref() != Some(fp.as_str()) {
+                locked_desired =
+                    desired_working_orders(&snap.working_orders, &sizing, long_only, &client_positions);
+                let master_eff_now = effective_positions(&snap.positions, &snap.working_orders);
+                locked_targets.clear();
+                for p in &master_eff_now {
+                    let mut t = target_net_qty(p.net_qty, p.avg_cost, &sizing).unwrap_or(0.0);
+                    if long_only && t < 0.0 {
+                        t = 0.0;
+                    }
+                    locked_targets.insert(p.symbol.clone(), t);
+                }
+                if last_fingerprint.is_some() {
+                    state.log(LogLevel::Info, "Master ledger changed — targets re-synced.".to_string());
+                }
+                last_fingerprint = Some(fp);
+            }
+        }
+
         // ── Channel 1: mirror the master's resting limit/stop orders ───────────
-        let desired = desired_working_orders(&snap.working_orders, &sizing, long_only, &client_positions);
+        // `desired` is the LOCKED mirror set (recomputed only on master-ledger change above).
+        let desired = &locked_desired;
         // One read of ALL live orders (incl. in-flight market orders) drives both the
         // mirror diff and the anti-stacking guard used by the market reconcile below.
         let live_orders = ib::read_live_orders(&client, &account).unwrap_or_default();
@@ -345,7 +380,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             .collect();
         let current_wo: Vec<pax_core::WorkingOrder> =
             current_working.iter().map(|(_, w)| w.clone()).collect();
-        let wdiff = diff_working_orders(&desired, &current_wo);
+        let wdiff = diff_working_orders(desired, &current_wo);
 
         for key in &wdiff.to_cancel {
             if let Some((id, w)) = current_working.iter().find(|(_, w)| &w.key() == key) {
@@ -402,7 +437,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         // net won't market-fill what a resting limit order will cover; protective orders
         // ride alongside their position. Market orders here only correct genuine drift.
         let master_eff = effective_positions(&snap.positions, &snap.working_orders);
-        let client_eff = effective_positions(&client_positions, &desired);
+        let client_eff = effective_positions(&client_positions, desired);
         let input = ReconcileInput {
             master: &master_eff,
             client: &client_eff,
@@ -411,6 +446,8 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             long_only,
             split_zero_cross: true,
             empty_master_guard: 2,
+            // Locked, balance-stable targets: resize only when the master's ledger changes.
+            targets: Some(&locked_targets),
         };
         let result = reconcile(&input);
 
@@ -561,6 +598,22 @@ fn do_close_all(client: &Client, state: &Arc<SharedState>, account: &str) {
 /// confirmations), suppressed from the order feed to avoid noise.
 fn is_notice_noise(code: i32) -> bool {
     matches!(code, 202 | 2100 | 2103 | 2104 | 2105 | 2106 | 2107 | 2108 | 2119 | 2150 | 2158)
+}
+
+/// Balance-independent signature of the master's ledger (net positions + resting orders).
+/// It changes only when the master opens/closes/resizes a position or alters a working
+/// order — never on balance or price drift — so it gates exactly when the client re-syncs.
+fn master_fingerprint(positions: &[Position], working: &[WorkingOrder]) -> String {
+    let mut parts: Vec<String> = positions
+        .iter()
+        .filter(|p| p.net_qty.abs() >= 0.5)
+        .map(|p| format!("P:{}:{:.0}", p.symbol, p.net_qty))
+        .collect();
+    for w in working {
+        parts.push(format!("W:{}", w.key()));
+    }
+    parts.sort();
+    parts.join("|")
 }
 
 /// True while `(symbol, side)` is within its post-rejection cool-off window.

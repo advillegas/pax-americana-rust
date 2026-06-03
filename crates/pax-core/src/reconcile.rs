@@ -94,6 +94,12 @@ pub struct ReconcileInput<'a> {
     /// If the master reports an empty book while the client holds more than this many
     /// positions, treat it as a likely connectivity glitch and refuse to act.
     pub empty_master_guard: usize,
+    /// Optional per-symbol signed target overrides. When `Some`, the engine uses these
+    /// fixed targets instead of recomputing them from `sizing` on every pass. This lets
+    /// the caller LOCK targets (computed proportionally at the moment the master's ledger
+    /// changes) so a matched book isn't resized on every balance/price tick — only when
+    /// the master itself adjusts. A symbol absent from the map targets `0` (close).
+    pub targets: Option<&'a BTreeMap<String, f64>>,
 }
 
 impl<'a> ReconcileInput<'a> {
@@ -106,6 +112,7 @@ impl<'a> ReconcileInput<'a> {
             long_only: false,
             split_zero_cross: true,
             empty_master_guard: 2,
+            targets: None,
         }
     }
 }
@@ -165,10 +172,14 @@ pub fn reconcile(input: &ReconcileInput) -> ReconcileResult {
         // Reference price for the notional clamp: prefer master avg cost.
         let price = master_pos.map(|p| p.avg_cost).unwrap_or(0.0);
 
-        // Target net quantity (signed), proportionally scaled and risk-clamped.
-        let mut target = match target_net_qty(master_net, price, &input.sizing) {
-            Some(t) => t,
-            None => continue, // balances vanished mid-pass; skip safely
+        // Target net quantity (signed). Prefer a locked override when supplied (so we only
+        // resize when the master's ledger changes); otherwise compute it proportionally.
+        let mut target = match input.targets {
+            Some(map) => map.get(sym).copied().unwrap_or(0.0),
+            None => match target_net_qty(master_net, price, &input.sizing) {
+                Some(t) => t,
+                None => continue, // balances vanished mid-pass; skip safely
+            },
         };
 
         // Long-only clamps every target to non-negative: a short can never be opened,
@@ -409,6 +420,40 @@ mod tests {
         input.sizing = equal_balances();
         let r = reconcile(&input);
         assert!(r.blocked, "empty master + many client positions must block");
+    }
+
+    /// With a LOCKED target equal to the current holding, the engine does nothing — even
+    /// though live sizing would say 100. This is the anti-churn guarantee: a matched book
+    /// is not resized by balance drift, only by a change to the (locked) target.
+    #[test]
+    fn locked_target_suppresses_balance_drift_resize() {
+        let master = vec![pos("AAPL", 100.0)];
+        let client = vec![pos("AAPL", 50.0)];
+        let mut targets = BTreeMap::new();
+        targets.insert("AAPL".to_string(), 50.0);
+        let mut input = ReconcileInput::new(&master, &client);
+        input.sizing = equal_balances(); // would otherwise target 100 -> +50
+        input.targets = Some(&targets);
+        let r = reconcile(&input);
+        assert!(r.intents.is_empty(), "locked target == holding -> no resize");
+    }
+
+    /// When the locked target changes (because the master adjusted), the client resizes
+    /// toward exactly the new target.
+    #[test]
+    fn locked_target_change_drives_resize() {
+        let master = vec![pos("AAPL", 100.0)];
+        let client = vec![pos("AAPL", 50.0)];
+        let mut targets = BTreeMap::new();
+        targets.insert("AAPL".to_string(), 120.0);
+        let mut input = ReconcileInput::new(&master, &client);
+        input.sizing = equal_balances();
+        input.targets = Some(&targets);
+        let r = reconcile(&input);
+        assert_eq!(r.intents.len(), 1);
+        assert_eq!(r.intents[0].side, Side::Buy);
+        assert_eq!(r.intents[0].qty, 70.0);
+        assert_eq!(r.intents[0].reason, IntentReason::IncreaseToTarget);
     }
 
     #[test]
