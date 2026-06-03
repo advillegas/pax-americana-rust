@@ -3,3 +3,8 @@
 *.pdb
 .env
 .DS_Store
+# transient test/smoke-test output
+*.txt
+*.tmp
+merr.txt
+cerr.txt
