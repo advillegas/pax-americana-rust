@@ -28,8 +28,10 @@ impl Default for MasterConfig {
     fn default() -> Self {
         MasterConfig {
             ib_host: "127.0.0.1".to_string(),
-            ib_port_live: 4001,
-            ib_port_paper: 4002,
+            // TWS ports by default (master typically runs against TWS). IB Gateway is
+            // 4001 live / 4002 paper — change in the GUI or via env if needed.
+            ib_port_live: 7496,
+            ib_port_paper: 7497,
             start_mode: IbMode::Paper,
             ib_client_id: 0,
             http_bind: "0.0.0.0:5001".to_string(),
