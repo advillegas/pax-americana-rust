@@ -110,6 +110,18 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             }
         }
     };
+    // Sync our order-id sequence with the server's next valid id. The ibapi connect seed
+    // can lag the gateway's real sequence, causing submissions with ids BELOW it ("OrderId
+    // N is < M") which IBKR rejects outright — so nothing fills and the engine retries
+    // forever. An explicit reqIds round-trip pins the sequence to the server's value.
+    match client.next_valid_order_id() {
+        Ok(id) => state.log(LogLevel::Ok, format!("Order id sequence synced (next={id})")),
+        Err(e) => state.log(
+            LogLevel::Warn,
+            format!("Could not sync order id sequence: {e} — proceeding with local sequence"),
+        ),
+    }
+
     let baseline = ib::read_margin(&client, &account).map(|m| m.net_liq).unwrap_or(0.0);
     state.log(LogLevel::Ok, format!("IB connected ✓ account={account}  balance=${baseline:.2}"));
     state.with_status(|s| {
