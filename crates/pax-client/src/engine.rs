@@ -24,6 +24,12 @@ use crate::license::{self, LicenseStatus};
 use crate::master_api::MasterApi;
 use crate::state::{AccountMode, ExecutionMode, LogLevel, SharedState, TradeMode};
 
+/// After IBKR rejects an order, pause re-submitting that contract+side for this long so a
+/// rejected order isn't hammered every cycle (the cause of 201 order floods).
+const REJECT_BACKOFF_SECS: u64 = 60;
+/// Throttle repeated identical IBKR notice codes to at most once per this interval.
+const NOTICE_THROTTLE_SECS: u64 = 30;
+
 pub fn spawn(cfg: ClientConfig, state: Arc<SharedState>) {
     thread::spawn(move || engine_main(cfg, state));
 }
@@ -137,6 +143,16 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
 
     let mut cooldown: HashMap<String, Instant> = HashMap::new();
     let mut wo_cooldown: HashMap<String, Instant> = HashMap::new();
+    // Order id → (symbol, side) for orders we placed, so async status updates (fills /
+    // rejections) can be attributed back to a contract and side.
+    let mut placed_orders: HashMap<i32, (String, Side)> = HashMap::new();
+    // (symbol, side) → time of last rejection; re-submits for that side pause until the
+    // backoff window elapses.
+    let mut reject_backoff: HashMap<(String, Side), Instant> = HashMap::new();
+    // Order ids already logged inactive/rejected — dedupe repeated status callbacks.
+    let mut logged_inactive: HashSet<i32> = HashSet::new();
+    // IBKR notice code → last log time, to throttle repeated identical notices.
+    let mut notice_log: HashMap<i32, Instant> = HashMap::new();
     let mut drawdown_hit = false;
     let mut last_unreachable_warn: Option<Instant> = None;
     let mut last_margin_warn: Option<Instant> = None;
@@ -175,16 +191,31 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
                     }
                     OrderUpdate::OrderStatus(s) => {
                         if s.status == "Inactive" {
-                            state.log(
-                                LogLevel::Err,
-                                format!("Order {} rejected/inactive (filled {:.0}, rem {:.0})", s.order_id, s.filled, s.remaining),
-                            );
-                            state.with_status(|st| st.orders_failed += 1);
+                            // Back off this contract/side so a rejected order isn't
+                            // resubmitted every cycle (root cause of the 201 floods).
+                            if let Some((sym, side)) = placed_orders.get(&s.order_id) {
+                                reject_backoff.insert((sym.clone(), *side), Instant::now());
+                            }
+                            // Log/count each rejection only once (IBKR re-sends the status).
+                            if logged_inactive.insert(s.order_id) {
+                                state.log(
+                                    LogLevel::Err,
+                                    format!("Order {} rejected/inactive (filled {:.0}, rem {:.0})", s.order_id, s.filled, s.remaining),
+                                );
+                                state.with_status(|st| st.orders_failed += 1);
+                            }
                         }
                     }
                     OrderUpdate::Message(n) => {
                         if !is_notice_noise(n.code) {
-                            state.log(LogLevel::Warn, format!("IBKR [{}] {}", n.code, n.message));
+                            let show = notice_log
+                                .get(&n.code)
+                                .map(|t| t.elapsed() > Duration::from_secs(NOTICE_THROTTLE_SECS))
+                                .unwrap_or(true);
+                            if show {
+                                notice_log.insert(n.code, Instant::now());
+                                state.log(LogLevel::Warn, format!("IBKR [{}] {}", n.code, n.message));
+                            }
                         }
                     }
                     _ => {}
@@ -297,7 +328,21 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
 
         // ── Channel 1: mirror the master's resting limit/stop orders ───────────
         let desired = desired_working_orders(&snap.working_orders, &sizing, long_only, &client_positions);
-        let current_working = ib::read_open_orders(&client, &account).unwrap_or_default();
+        // One read of ALL live orders (incl. in-flight market orders) drives both the
+        // mirror diff and the anti-stacking guard used by the market reconcile below.
+        let live_orders = ib::read_live_orders(&client, &account).unwrap_or_default();
+        // Contracts/sides that already have one of OUR market orders working — never stack
+        // a second market order on the same one (this is what trips IBKR error 201).
+        let active_market_sides: HashSet<(String, Side)> = live_orders
+            .iter()
+            .filter(|o| matches!(o.kind, pax_core::OrderKind::Market))
+            .map(|o| (o.symbol.clone(), o.side))
+            .collect();
+        let current_working: Vec<(i32, pax_core::WorkingOrder)> = live_orders
+            .iter()
+            .filter(|o| !matches!(o.kind, pax_core::OrderKind::Market))
+            .map(|o| (o.id, o.to_working()))
+            .collect();
         let current_wo: Vec<pax_core::WorkingOrder> =
             current_working.iter().map(|(_, w)| w.clone()).collect();
         let wdiff = diff_working_orders(&desired, &current_wo);
@@ -326,10 +371,15 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
                     continue;
                 }
             }
+            // Don't re-place an entry on a contract/side IBKR just rejected.
+            if w.is_entry && in_backoff(&reject_backoff, &w.symbol, w.side) {
+                continue;
+            }
             match ib::place_order(
                 &client, &account, &w.symbol, &w.currency, &w.exchange, w.side, w.quantity, w.kind, w.limit_price, w.aux_price,
             ) {
-                Ok(()) => {
+                Ok(id) => {
+                    placed_orders.insert(id, (w.symbol.clone(), w.side));
                     wo_cooldown.insert(w.key(), Instant::now());
                     state.with_status(|s| s.orders_placed += 1);
                     let lvl = if w.side == Side::Buy { LogLevel::Buy } else { LogLevel::Sell };
@@ -376,6 +426,15 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             }
         } else {
             for intent in &result.intents {
+                // Never stack a second market order on a contract/side that already has one
+                // of ours in flight — this is exactly what trips IBKR error 201.
+                if active_market_sides.contains(&(intent.symbol.clone(), intent.side)) {
+                    continue;
+                }
+                // Pause a contract/side IBKR recently rejected (cool-off, not every cycle).
+                if in_backoff(&reject_backoff, &intent.symbol, intent.side) {
+                    continue;
+                }
                 // Margin: gate opening/increasing via what-if buying-power check; always
                 // allow reduces/closes/flattens (they free margin).
                 if is_opening(intent.reason)
@@ -416,7 +475,8 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
                     intent.limit_price,
                     intent.aux_price,
                 ) {
-                    Ok(()) => {
+                    Ok(id) => {
+                        placed_orders.insert(id, (intent.symbol.clone(), intent.side));
                         cooldown.insert(intent.symbol.clone(), Instant::now());
                         let lvl = match intent.side {
                             Side::Buy => LogLevel::Buy,
@@ -501,6 +561,14 @@ fn do_close_all(client: &Client, state: &Arc<SharedState>, account: &str) {
 /// confirmations), suppressed from the order feed to avoid noise.
 fn is_notice_noise(code: i32) -> bool {
     matches!(code, 202 | 2100 | 2103 | 2104 | 2105 | 2106 | 2107 | 2108 | 2119 | 2150 | 2158)
+}
+
+/// True while `(symbol, side)` is within its post-rejection cool-off window.
+fn in_backoff(backoff: &HashMap<(String, Side), Instant>, symbol: &str, side: Side) -> bool {
+    backoff
+        .get(&(symbol.to_string(), side))
+        .map(|t| t.elapsed() < Duration::from_secs(REJECT_BACKOFF_SECS))
+        .unwrap_or(false)
 }
 
 fn is_closing(reason: IntentReason) -> bool {

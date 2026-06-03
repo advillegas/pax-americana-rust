@@ -119,6 +119,8 @@ fn build_order(account: &str, side: Side, qty: f64, kind: OrderKind, limit_price
 }
 
 /// Place a single order on `account`. `qty` must be a positive whole share count.
+/// Returns the assigned IBKR order id so the caller can correlate later status updates
+/// (fills / rejections) back to the symbol that was ordered.
 #[allow(clippy::too_many_arguments)]
 pub fn place_order(
     client: &Client,
@@ -131,56 +133,94 @@ pub fn place_order(
     kind: OrderKind,
     limit_price: f64,
     aux_price: f64,
-) -> Result<(), String> {
+) -> Result<i32, String> {
     let contract = Contract::stock(symbol)
         .in_currency(currency)
         .on_exchange(exchange)
         .build();
     let order = build_order(account, side, qty, kind, limit_price, aux_price);
     let id = client.next_order_id();
-    client.submit_order(id, &contract, &order).map_err(|e| e.to_string())
+    client.submit_order(id, &contract, &order).map_err(|e| e.to_string())?;
+    Ok(id)
 }
 
-/// Read this client's own resting limit/stop/stop-limit orders **for `account`**, paired
-/// with their order ids (so stale mirrors can be cancelled). Scoped to this API client id
-/// AND the target account.
-pub fn read_open_orders(client: &Client, account: &str) -> Result<Vec<(i32, WorkingOrder)>, String> {
+/// A single live (working) order on the account, regardless of type. Market orders are
+/// included here (unlike [`read_open_orders`]) so the engine can see its own in-flight
+/// orders and avoid stacking duplicates on the same contract/side.
+#[derive(Debug, Clone)]
+pub struct LiveOrder {
+    pub id: i32,
+    pub symbol: String,
+    pub currency: String,
+    pub exchange: String,
+    pub side: Side,
+    pub qty: f64,
+    pub kind: OrderKind,
+    pub limit_price: f64,
+    pub aux_price: f64,
+}
+
+impl LiveOrder {
+    /// View this live order as a [`WorkingOrder`] (used for the mirror diff). `is_entry`
+    /// is not knowable from the order alone, so it is left false here.
+    pub fn to_working(&self) -> WorkingOrder {
+        WorkingOrder {
+            symbol: self.symbol.clone(),
+            currency: self.currency.clone(),
+            exchange: self.exchange.clone(),
+            side: self.side,
+            quantity: self.qty,
+            kind: self.kind,
+            limit_price: self.limit_price,
+            aux_price: self.aux_price,
+            is_entry: false,
+        }
+    }
+}
+
+/// Read ALL of this client's live/working orders for `account` (any order type, including
+/// market). Scoped to the target account so a multi-account login is never affected.
+pub fn read_live_orders(client: &Client, account: &str) -> Result<Vec<LiveOrder>, String> {
     let sub = client.open_orders().map_err(|e| e.to_string())?;
-    let mut out: Vec<(i32, WorkingOrder)> = Vec::new();
+    let mut out: Vec<LiveOrder> = Vec::new();
     for item in &sub {
         if let Orders::OrderData(d) = item {
             if d.order.account != account {
                 continue;
             }
-            let kind = OrderKind::from_ib(&d.order.order_type);
-            if matches!(kind, OrderKind::Market) {
+            let qty = d.order.total_quantity.abs();
+            if qty == 0.0 {
                 continue;
             }
             let side = match d.order.action {
                 Action::Buy => Side::Buy,
                 _ => Side::Sell,
             };
-            let qty = d.order.total_quantity.abs();
-            if qty == 0.0 {
-                continue;
-            }
-            out.push((
-                d.order_id,
-                WorkingOrder {
-                    symbol: d.contract.symbol.to_string(),
-                    currency: nonempty(d.contract.currency.to_string(), "USD"),
-                    exchange: nonempty(d.contract.exchange.to_string(), "SMART"),
-                    side,
-                    quantity: qty,
-                    kind,
-                    limit_price: d.order.limit_price.unwrap_or(0.0),
-                    aux_price: d.order.aux_price.unwrap_or(0.0),
-                    is_entry: false,
-                },
-            ));
+            out.push(LiveOrder {
+                id: d.order_id,
+                symbol: d.contract.symbol.to_string(),
+                currency: nonempty(d.contract.currency.to_string(), "USD"),
+                exchange: nonempty(d.contract.exchange.to_string(), "SMART"),
+                side,
+                qty,
+                kind: OrderKind::from_ib(&d.order.order_type),
+                limit_price: d.order.limit_price.unwrap_or(0.0),
+                aux_price: d.order.aux_price.unwrap_or(0.0),
+            });
         }
     }
     Ok(out)
+}
+
+/// Read this client's own resting limit/stop/stop-limit orders **for `account`**, paired
+/// with their order ids (so stale mirrors can be cancelled). Market orders are excluded —
+/// use [`read_live_orders`] when in-flight market orders matter.
+pub fn read_open_orders(client: &Client, account: &str) -> Result<Vec<(i32, WorkingOrder)>, String> {
+    Ok(read_live_orders(client, account)?
+        .into_iter()
+        .filter(|o| !matches!(o.kind, OrderKind::Market))
+        .map(|o| (o.id, o.to_working()))
+        .collect())
 }
 
 /// Cancel a single order by id.
