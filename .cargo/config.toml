@@ -1,0 +1,6 @@
+# Statically link the Visual C++ runtime so the release binaries are fully
+# self-contained: they run on a clean Windows machine with no VC++ redistributable
+# and no sidecar files. Combined with embedded TLS roots (webpki-roots), embedded
+# fonts (egui), and statically-linked crypto (ring), the .exe needs nothing external.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]
