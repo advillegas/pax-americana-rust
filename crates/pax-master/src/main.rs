@@ -91,10 +91,7 @@ fn main() {
     }
     {
         let state = state.clone();
-        ui.on_download_update(move || {
-            let url = state.update.lock().url.clone();
-            open_url(&url);
-        });
+        ui.on_download_update(move || spawn_self_update(state.clone()));
     }
 
     let timer = slint::Timer::default();
@@ -169,10 +166,10 @@ fn spawn_update_check(state: std::sync::Arc<SharedState>) {
         let repo = std::env::var("PAX_UPDATE_REPO").unwrap_or_else(|_| UPDATE_REPO.to_string());
         let current = env!("CARGO_PKG_VERSION");
         let mut u = state.update.lock();
-        match pax_core::update::check(&repo, current) {
+        match pax_core::update::check(&repo, current, "master") {
             Some(info) => {
                 u.available = true;
-                u.url = info.url;
+                u.url = info.asset_url;
                 u.message = format!("Update available: v{}  (you have v{current})", info.version);
             }
             None => {
@@ -184,15 +181,22 @@ fn spawn_update_check(state: std::sync::Arc<SharedState>) {
     });
 }
 
-/// Open a URL in the default browser without flashing a console window.
-fn open_url(url: &str) {
-    if url.is_empty() {
-        return;
-    }
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn();
+/// Download and self-apply the update, then exit so the relaunch script can swap the exe.
+fn spawn_self_update(state: std::sync::Arc<SharedState>) {
+    std::thread::spawn(move || {
+        let asset = state.update.lock().url.clone();
+        state.update.lock().message = "Downloading update…".to_string();
+        match pax_core::update::download_and_apply(&asset) {
+            Ok(()) => {
+                state.update.lock().message = "Restarting to apply update…".to_string();
+                std::thread::sleep(Duration::from_millis(900));
+                std::process::exit(0);
+            }
+            Err(e) => {
+                state.update.lock().message = format!("Update failed: {e}");
+            }
+        }
+    });
 }
 
 /// Kill switch: terminate every other instance of this executable (frees clogged ports).
