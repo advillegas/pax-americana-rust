@@ -688,7 +688,9 @@ fn do_close_all(client: &Client, state: &Arc<SharedState>, account: &str) {
 /// IBKR system notices that are routine status/connectivity chatter (and cancel
 /// confirmations), suppressed from the order feed to avoid noise.
 fn is_notice_noise(code: i32) -> bool {
-    matches!(code, 202 | 2100 | 2103 | 2104 | 2105 | 2106 | 2107 | 2108 | 2119 | 2150 | 2158)
+    // 2161 = limit-order price-capped per IBKR's disruptive-order control (informational;
+    // the order still rests and works). Routine noise on the mirror channel.
+    matches!(code, 202 | 2100 | 2103 | 2104 | 2105 | 2106 | 2107 | 2108 | 2119 | 2150 | 2158 | 2161)
 }
 
 /// Balance-independent signature of the master's ledger (net positions + resting orders).
