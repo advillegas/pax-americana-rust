@@ -56,30 +56,55 @@ impl eframe::App for MasterApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(ui::BG).inner_margin(egui::Margin::same(16)))
             .show(ctx, |uic| {
-                // Connection mode toggle.
+                // Connection: editable host/ports + Live/Paper, applied on reconnect.
                 ui::section(uic, "Connection", |uic| {
-                    let mut mode = self.state.mode.lock();
-                    let before = *mode;
+                    let mut conn = self.state.conn.lock();
+                    let mode_before = conn.mode;
+
                     uic.horizontal(|uic| {
                         uic.label(RichText::new("Account").color(ui::TEXT_DIM));
-                        ui::segmented(uic, &mut *mode, &[(IbMode::Live, "Live"), (IbMode::Paper, "Paper")]);
+                        ui::segmented(uic, &mut conn.mode, &[(IbMode::Live, "Live"), (IbMode::Paper, "Paper")]);
                         uic.add_space(10.0);
-                        let (mc, mlabel) = match *mode {
+                        let (mc, ml) = match conn.mode {
                             IbMode::Live => (ui::RED, "● LIVE — real funds"),
                             IbMode::Paper => (ui::GREEN, "● Paper — simulated"),
                         };
-                        uic.label(RichText::new(mlabel).color(mc).strong());
+                        uic.label(RichText::new(ml).color(mc).strong());
                     });
-                    let changed = *mode != before;
-                    drop(mode);
-                    if changed {
-                        self.state.log(LogLevel::Warn, "Mode changed — reconnecting to new port…");
+
+                    uic.add_space(6.0);
+                    egui::Grid::new("conn_grid").num_columns(4).spacing([12.0, 6.0]).show(uic, |uic| {
+                        uic.label(RichText::new("Host").color(ui::TEXT_DIM));
+                        uic.add(egui::TextEdit::singleline(&mut conn.host).desired_width(150.0));
+                        uic.end_row();
+                        uic.label(RichText::new("Live port").color(ui::TEXT_DIM));
+                        uic.add(egui::DragValue::new(&mut conn.port_live).range(1..=65535).speed(1.0));
+                        uic.label(RichText::new("Paper port").color(ui::TEXT_DIM));
+                        uic.add(egui::DragValue::new(&mut conn.port_paper).range(1..=65535).speed(1.0));
+                        uic.end_row();
+                    });
+
+                    uic.add_space(8.0);
+                    let ep = conn.endpoint();
+                    let mode_changed = conn.mode != mode_before;
+                    let apply = uic
+                        .horizontal(|uic| {
+                            let clicked = ui::ember_button(uic, "APPLY & RECONNECT").clicked();
+                            uic.label(RichText::new(format!("→ {ep}")).color(ui::TEXT_FAINT).monospace().size(11.0));
+                            clicked
+                        })
+                        .inner;
+                    drop(conn);
+
+                    if mode_changed || apply {
+                        self.state.request_reconnect();
+                        self.state.log(LogLevel::Warn, format!("Reconnecting to {ep}…"));
                     }
+                    uic.add_space(2.0);
                     uic.label(
-                        RichText::new(format!("Endpoint  {}", self.state.endpoint()))
+                        RichText::new("TWS: 7496 live / 7497 paper   ·   Gateway: 4001 / 4002")
                             .color(ui::TEXT_FAINT)
-                            .monospace()
-                            .size(11.0),
+                            .size(10.5),
                     );
                 });
 

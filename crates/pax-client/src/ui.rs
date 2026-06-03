@@ -159,6 +159,26 @@ impl eframe::App for ClientApp {
                                 }
                             }
                         });
+                        uic.add_space(6.0);
+                        uic.add_enabled_ui(!running, |uic| {
+                            egui::Grid::new("client_conn").num_columns(4).spacing([12.0, 6.0]).show(uic, |uic| {
+                                uic.label(RichText::new("IB Host").color(ui::TEXT_DIM));
+                                uic.add(egui::TextEdit::singleline(&mut controls.ib_host).desired_width(150.0));
+                                uic.end_row();
+                                uic.label(RichText::new("Live port").color(ui::TEXT_DIM));
+                                uic.add(egui::DragValue::new(&mut controls.ib_port_live).range(1..=65535).speed(1.0));
+                                uic.label(RichText::new("Paper port").color(ui::TEXT_DIM));
+                                uic.add(egui::DragValue::new(&mut controls.ib_port_paper).range(1..=65535).speed(1.0));
+                                uic.end_row();
+                            });
+                        });
+                        uic.label(
+                            RichText::new(
+                                "Gateway: 4001 live / 4002 paper · TWS: 7496 / 7497 · applied on START",
+                            )
+                            .color(ui::TEXT_FAINT)
+                            .size(10.5),
+                        );
                     });
                     uic.add_space(10.0);
 

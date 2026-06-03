@@ -1,5 +1,6 @@
 //! Shared, thread-safe master state.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -65,16 +66,35 @@ impl IbMode {
     }
 }
 
+/// GUI-editable IB connection parameters.
+#[derive(Debug, Clone)]
+pub struct ConnParams {
+    pub host: String,
+    pub port_live: u16,
+    pub port_paper: u16,
+    pub mode: IbMode,
+}
+
+impl ConnParams {
+    pub fn port(&self) -> u16 {
+        match self.mode {
+            IbMode::Live => self.port_live,
+            IbMode::Paper => self.port_paper,
+        }
+    }
+    pub fn endpoint(&self) -> String {
+        format!("{}:{}", self.host, self.port())
+    }
+}
+
 pub struct SharedState {
     pub snapshot: Mutex<MasterSnapshot>,
     pub log: Mutex<LogBuffer>,
     pub http_bind: String,
-    pub host: String,
-    pub port_live: u16,
-    pub port_paper: u16,
-    /// Current connection mode — the GUI writes it, the IB worker reads it and
-    /// reconnects to the matching port when it changes.
-    pub mode: Mutex<IbMode>,
+    /// GUI-editable connection params; the IB worker reads them on (re)connect.
+    pub conn: Mutex<ConnParams>,
+    /// Bumped by the GUI to ask the worker to drop and reconnect with fresh params.
+    pub reconnect_gen: AtomicU64,
 }
 
 impl SharedState {
@@ -89,26 +109,27 @@ impl SharedState {
             snapshot: Mutex::new(MasterSnapshot::default()),
             log: Mutex::new(LogBuffer::default()),
             http_bind,
-            host,
-            port_live,
-            port_paper,
-            mode: Mutex::new(start_mode),
+            conn: Mutex::new(ConnParams {
+                host,
+                port_live,
+                port_paper,
+                mode: start_mode,
+            }),
+            reconnect_gen: AtomicU64::new(0),
         })
     }
 
-    pub fn mode(&self) -> IbMode {
-        *self.mode.lock()
-    }
-
-    pub fn port(&self) -> u16 {
-        match self.mode() {
-            IbMode::Live => self.port_live,
-            IbMode::Paper => self.port_paper,
-        }
-    }
-
     pub fn endpoint(&self) -> String {
-        format!("{}:{}", self.host, self.port())
+        self.conn.lock().endpoint()
+    }
+
+    pub fn reconnect_gen(&self) -> u64 {
+        self.reconnect_gen.load(Ordering::Relaxed)
+    }
+
+    /// Ask the IB worker to reconnect with the latest params.
+    pub fn request_reconnect(&self) {
+        self.reconnect_gen.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn log(&self, level: LogLevel, msg: impl Into<String>) {

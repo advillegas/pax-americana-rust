@@ -37,15 +37,16 @@ pub fn spawn(cfg: MasterConfig, state: Arc<SharedState>) -> Arc<AtomicBool> {
 
 fn worker_loop(cfg: MasterConfig, state: Arc<SharedState>, stop: Arc<AtomicBool>) {
     while !stop.load(Ordering::Relaxed) {
-        // Endpoint + mode are read fresh each attempt so the GUI's Live/Paper toggle
-        // takes effect on (re)connect.
-        let connected_mode = state.mode();
-        let endpoint = state.endpoint();
+        // Params are read fresh each attempt so GUI edits (host/port/mode) take effect on
+        // (re)connect. `gen` lets us notice an Apply/toggle and reconnect.
+        let gen = state.reconnect_gen();
+        let params = state.conn.lock().clone();
+        let endpoint = params.endpoint();
         state.log(
             LogLevel::Info,
             format!(
                 "Connecting to IB at {endpoint} [{}] (clientId={})…",
-                connected_mode.label(),
+                params.mode.label(),
                 cfg.ib_client_id
             ),
         );
@@ -93,13 +94,10 @@ fn worker_loop(cfg: MasterConfig, state: Arc<SharedState>, stop: Arc<AtomicBool>
                 return;
             }
 
-            // Operator flipped Live/Paper — drop this connection and reconnect to the
-            // new port.
-            if state.mode() != connected_mode {
-                state.log(
-                    LogLevel::Warn,
-                    format!("Mode switched to {} — reconnecting…", state.mode().label()),
-                );
+            // Operator changed connection params (host/port/mode) and applied — drop
+            // this connection and reconnect with the new params.
+            if state.reconnect_gen() != gen {
+                state.log(LogLevel::Warn, "Connection settings changed — reconnecting…");
                 break;
             }
 

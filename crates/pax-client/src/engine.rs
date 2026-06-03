@@ -42,13 +42,16 @@ fn engine_main(cfg: ClientConfig, state: Arc<SharedState>) {
 }
 
 fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>, api: &MasterApi) {
-    let account_mode = state.controls.lock().account_mode;
+    let (account_mode, host, port_live, port_paper) = {
+        let c = state.controls.lock();
+        (c.account_mode, c.ib_host.clone(), c.ib_port_live, c.ib_port_paper)
+    };
     let port = match account_mode {
-        AccountMode::Live => cfg.ib_port_live,
-        AccountMode::Paper => cfg.ib_port_paper,
+        AccountMode::Live => port_live,
+        AccountMode::Paper => port_paper,
     };
     let cid = stable_client_id();
-    let endpoint = format!("{}:{}", cfg.ib_host, port);
+    let endpoint = format!("{}:{}", host, port);
     state.log(LogLevel::Info, format!("Connecting to IB {endpoint} clientId={cid}…"));
 
     let client = match Client::connect(&endpoint, cid) {

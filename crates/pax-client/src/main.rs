@@ -29,6 +29,12 @@ fn main() -> eframe::Result<()> {
 
     let cfg = ClientConfig::from_env();
     let state = SharedState::new();
+    {
+        let mut c = state.controls.lock();
+        c.ib_host = cfg.ib_host.clone();
+        c.ib_port_live = cfg.ib_port_live;
+        c.ib_port_paper = cfg.ib_port_paper;
+    }
     state.log(
         state::LogLevel::Info,
         format!("Pax Americana ready. Master: {}", cfg.master_url),
