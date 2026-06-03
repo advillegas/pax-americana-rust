@@ -128,10 +128,12 @@ fn main() {
             ui.set_status_text(
                 if s.drawdown_hit {
                     "⚠ DRAWDOWN HALT".to_string()
-                } else if s.connected {
+                } else if s.connected && s.master_connected {
                     "● CONNECTED - syncing".to_string()
+                } else if s.connected {
+                    "● CONNECTED to IB - waiting for server".to_string()
                 } else if running {
-                    "... connecting".to_string()
+                    "... connecting to IB".to_string()
                 } else {
                     "■ STOPPED".to_string()
                 }

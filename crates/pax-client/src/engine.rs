@@ -159,45 +159,19 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             }
         }
 
-        // ── fetch master snapshot ────────────────────────────────────────────
-        let snap = match api.snapshot() {
-            Ok(s) => s,
-            Err(e) => {
-                let warn = last_unreachable_warn
-                    .map(|t| t.elapsed() > Duration::from_secs(30))
-                    .unwrap_or(true);
-                if warn {
-                    state.log(LogLevel::Warn, format!("Server sync skipped: {e}"));
-                    last_unreachable_warn = Some(Instant::now());
-                }
-                state.with_status(|s| s.master_connected = false);
-                sleep_running(cfg.sync_interval_secs, state);
-                continue;
-            }
-        };
-
-        // ── read our own positions ───────────────────────────────────────────
+        // ── read OUR OWN positions (independent of the server) ────────────────
         let client_positions = match ib::read_positions(&client, &account) {
             Ok(p) => p,
             Err(e) => {
                 state.log(LogLevel::Warn, format!("Position read failed: {e} — reconnecting"));
-                break; // outer loop reconnects
+                break; // outer loop reconnects to IB
             }
         };
 
-        // Capture the master's starting structure once per session for New-Only mode.
-        if baseline_symbols.is_none() {
-            baseline_symbols = Some(snap.positions.iter().map(|p| p.symbol.clone()).collect());
-        }
-
-        let controls = state.controls.lock().clone();
+        // Always reflect our own IB state in the GUI, whether or not the server is up.
         state.with_status(|s| {
             s.client_balance = client_balance;
-            s.master_balance = snap.balance;
-            s.master_connected = snap.connected;
-            s.master_positions = snap.positions.len();
             s.client_positions = client_positions.len();
-            s.last_sync = crate::state::now_hms();
             s.excess_liquidity = margin.excess_liquidity;
             s.cushion = margin.cushion;
             s.sma = margin.sma;
@@ -208,6 +182,38 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             sleep_running(cfg.sync_interval_secs, state);
             continue;
         }
+
+        // ── fetch the server snapshot (entirely separate from the IB link) ─────
+        let snap = match api.snapshot() {
+            Ok(s) => {
+                state.with_status(|st| {
+                    st.master_balance = s.balance;
+                    st.master_connected = s.connected;
+                    st.master_positions = s.positions.len();
+                    st.last_sync = crate::state::now_hms();
+                });
+                s
+            }
+            Err(e) => {
+                let warn = last_unreachable_warn
+                    .map(|t| t.elapsed() > Duration::from_secs(30))
+                    .unwrap_or(true);
+                if warn {
+                    state.log(LogLevel::Warn, format!("Server sync skipped: {e} (client stays connected to IB)"));
+                    last_unreachable_warn = Some(Instant::now());
+                }
+                state.with_status(|s| s.master_connected = false);
+                sleep_running(cfg.sync_interval_secs, state);
+                continue;
+            }
+        };
+
+        // Capture the server's starting structure once per session for New-Only mode.
+        if baseline_symbols.is_none() {
+            baseline_symbols = Some(snap.positions.iter().map(|p| p.symbol.clone()).collect());
+        }
+
+        let controls = state.controls.lock().clone();
 
         let sizing = SizingParams {
             multiplier: controls.multiplier,
