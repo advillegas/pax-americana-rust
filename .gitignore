@@ -3,3 +3,7 @@
 *.pdb
 .env
 .DS_Store
+
+*.txt
+merr.txt
+cerr.txt
