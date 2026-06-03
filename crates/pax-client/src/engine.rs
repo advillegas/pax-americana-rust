@@ -5,7 +5,7 @@
 //! positions, reconciles them into delta orders via [`pax_core::reconcile`], and submits
 //! those orders — with a per-symbol cooldown so in-flight fills are never double-ordered.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
@@ -15,7 +15,7 @@ use ibapi::client::blocking::Client;
 use ibapi::orders::OrderUpdate;
 use pax_core::{
     desired_working_orders, diff_working_orders, effective_positions, reconcile, target_net_qty,
-    IntentReason, Position, ReconcileInput, Side, SizingParams, WorkingOrder,
+    IntentReason, ReconcileInput, Side, SizingParams, WorkingOrder,
 };
 
 use crate::config::{stable_client_id, ClientConfig};
@@ -181,16 +181,27 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
     // Resume from the persisted ledger (if it belongs to this account) so a restart does
     // NOT recompute/resize a book that already matches — only a real master change since
     // the ledger was written will trigger a resize.
-    let (mut last_fingerprint, mut locked_targets, mut locked_desired) =
+    //
+    // Gating is PER SYMBOL: `seen_master_net` is the master net qty we last locked a target
+    // against, per symbol. A target is only recomputed (with the then-current balances) when
+    // THAT symbol's master net changes — so a move in one name, or a re-priced master order,
+    // never re-sizes a symbol the master left untouched. `last_wo_fp` gates the resting-order
+    // mirror independently.
+    let (mut seen_master_net, mut locked_targets, mut last_wo_fp, mut locked_desired) =
         match crate::ledger::load(&account) {
             Some(l) => {
                 state.log(
                     LogLevel::Ok,
                     format!("Resumed saved ledger ({} targets) — no resize unless the server changed.", l.targets.len()),
                 );
-                (l.fingerprint, l.targets, l.desired)
+                (l.seen_master_net, l.targets, l.wo_fingerprint, l.desired)
             }
-            None => (None, BTreeMap::<String, f64>::new(), Vec::<WorkingOrder>::new()),
+            None => (
+                BTreeMap::<String, f64>::new(),
+                BTreeMap::<String, f64>::new(),
+                None::<String>,
+                Vec::<WorkingOrder>::new(),
+            ),
         };
     let mut last_ledger_save = Instant::now();
 
@@ -381,26 +392,53 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         // proportionally to the CURRENT balances at that instant, then held — so a matched
         // book is never resized by mere balance/price drift (the source of commission bleed).
         if sizing.ratio().is_some() {
-            let fp = master_fingerprint(&snap.positions, &snap.working_orders);
-            if last_fingerprint.as_deref() != Some(fp.as_str()) {
+            let mut changed = false;
+
+            // Resting-order mirror: recompute only when the master's working orders change.
+            let wo_fp = working_orders_fingerprint(&snap.working_orders);
+            if last_wo_fp.as_deref() != Some(wo_fp.as_str()) {
                 locked_desired =
                     desired_working_orders(&snap.working_orders, &sizing, long_only, &client_positions);
-                let master_eff_now = effective_positions(&snap.positions, &snap.working_orders);
-                locked_targets.clear();
-                for p in &master_eff_now {
-                    let mut t = target_net_qty(p.net_qty, p.avg_cost, &sizing).unwrap_or(0.0);
-                    if long_only && t < 0.0 {
-                        t = 0.0;
-                    }
-                    locked_targets.insert(p.symbol.clone(), t);
+                last_wo_fp = Some(wo_fp);
+                changed = true;
+            }
+
+            // Position targets: recompute PER SYMBOL, only where the master net changed.
+            let master_eff_now = effective_positions(&snap.positions, &snap.working_orders);
+            let mut now_net: BTreeMap<String, (f64, f64)> = BTreeMap::new(); // sym -> (net, price)
+            for p in &master_eff_now {
+                now_net.insert(p.symbol.clone(), (p.net_qty, p.avg_cost));
+            }
+            // Walk the union of previously-tracked and currently-held master symbols.
+            let mut syms: BTreeSet<String> = seen_master_net.keys().cloned().collect();
+            syms.extend(now_net.keys().cloned());
+            for sym in syms {
+                let now = now_net.get(&sym).map(|(n, _)| *n).unwrap_or(0.0);
+                let symbol_changed = match seen_master_net.get(&sym).copied() {
+                    Some(prev) => (prev - now).abs() >= 0.5,
+                    None => true,
+                };
+                if !symbol_changed {
+                    continue;
                 }
-                if last_fingerprint.is_some() {
-                    state.log(LogLevel::Info, "Master ledger changed — targets re-synced.".to_string());
+                let price = now_net.get(&sym).map(|(_, p)| *p).unwrap_or(0.0);
+                let mut t = if now.abs() < 0.5 {
+                    0.0 // master flat in this symbol → target flat (close orphan)
+                } else {
+                    target_net_qty(now, price, &sizing).unwrap_or(0.0)
+                };
+                if long_only && t < 0.0 {
+                    t = 0.0;
                 }
-                last_fingerprint = Some(fp);
-                // Persist the new locked structure right away so a restart immediately after
-                // a master change resumes the new targets, not the stale ones.
-                crate::ledger::save(&account, &last_fingerprint, &locked_targets, &locked_desired);
+                locked_targets.insert(sym.clone(), t);
+                seen_master_net.insert(sym.clone(), now);
+                changed = true;
+            }
+
+            if changed {
+                state.log(LogLevel::Info, "Server ledger changed — re-synced affected symbols.".to_string());
+                // Persist immediately so a restart right after a change resumes the new state.
+                crate::ledger::save(&account, &seen_master_net, &locked_targets, &last_wo_fp, &locked_desired);
                 last_ledger_save = Instant::now();
             }
         }
@@ -592,7 +630,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
 
         // Persist the ledger on a 15s cadence so the matched state survives a crash/restart.
         if last_ledger_save.elapsed() >= Duration::from_secs(15) {
-            crate::ledger::save(&account, &last_fingerprint, &locked_targets, &locked_desired);
+            crate::ledger::save(&account, &seen_master_net, &locked_targets, &last_wo_fp, &locked_desired);
             last_ledger_save = Instant::now();
         }
 
@@ -600,7 +638,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
     }
 
     // Save once more on a clean stop so the latest matched state is on disk.
-    crate::ledger::save(&account, &last_fingerprint, &locked_targets, &locked_desired);
+    crate::ledger::save(&account, &seen_master_net, &locked_targets, &last_wo_fp, &locked_desired);
     state.log(LogLevel::Warn, "Engine session ended.");
 }
 
@@ -656,15 +694,10 @@ fn is_notice_noise(code: i32) -> bool {
 /// Balance-independent signature of the master's ledger (net positions + resting orders).
 /// It changes only when the master opens/closes/resizes a position or alters a working
 /// order — never on balance or price drift — so it gates exactly when the client re-syncs.
-fn master_fingerprint(positions: &[Position], working: &[WorkingOrder]) -> String {
-    let mut parts: Vec<String> = positions
-        .iter()
-        .filter(|p| p.net_qty.abs() >= 0.5)
-        .map(|p| format!("P:{}:{:.0}", p.symbol, p.net_qty))
-        .collect();
-    for w in working {
-        parts.push(format!("W:{}", w.key()));
-    }
+/// Stable signature of just the master's resting orders, used to gate the mirror channel
+/// (position targets are gated separately, per symbol).
+fn working_orders_fingerprint(working: &[WorkingOrder]) -> String {
+    let mut parts: Vec<String> = working.iter().map(|w| w.key()).collect();
     parts.sort();
     parts.join("|")
 }

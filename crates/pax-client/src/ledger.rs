@@ -23,10 +23,14 @@ const LEGACY: &str = "pax-client.ledger.json";
 pub struct Ledger {
     /// IBKR account this ledger belongs to; a mismatch is ignored (never cross accounts).
     pub account: String,
-    /// Balance-independent signature of the master's ledger at the last sync.
-    pub fingerprint: Option<String>,
+    /// Master net qty per symbol we last locked a target against (per-symbol change gate).
+    #[serde(default)]
+    pub seen_master_net: BTreeMap<String, f64>,
     /// Locked per-symbol signed target net quantities.
     pub targets: BTreeMap<String, f64>,
+    /// Signature of the master's resting orders at the last mirror re-sync.
+    #[serde(default)]
+    pub wo_fingerprint: Option<String>,
     /// Locked desired mirror (resting) orders.
     pub desired: Vec<WorkingOrder>,
 }
@@ -56,14 +60,16 @@ pub fn load(account: &str) -> Option<Ledger> {
 /// Write the current gate state to disk (best-effort; ignores I/O errors).
 pub fn save(
     account: &str,
-    fingerprint: &Option<String>,
+    seen_master_net: &BTreeMap<String, f64>,
     targets: &BTreeMap<String, f64>,
+    wo_fingerprint: &Option<String>,
     desired: &[WorkingOrder],
 ) {
     let l = Ledger {
         account: account.to_string(),
-        fingerprint: fingerprint.clone(),
+        seen_master_net: seen_master_net.clone(),
         targets: targets.clone(),
+        wo_fingerprint: wo_fingerprint.clone(),
         desired: desired.to_vec(),
     };
     if let Ok(bytes) = serde_json::to_vec(&l) {
