@@ -25,14 +25,14 @@ impl MasterApi {
         if !self.api_key.is_empty() {
             req = req.set("X-API-Key", &self.api_key);
         }
-        let resp = req.call().map_err(|e| format!("master unreachable: {e}"))?;
+        let resp = req.call().map_err(|e| format!("server unreachable: {e}"))?;
         let body = resp
             .into_string()
-            .map_err(|e| format!("master read failed: {e}"))?;
+            .map_err(|e| format!("server read failed: {e}"))?;
         let snap = MasterSnapshot::from_json(&body).map_err(|e| format!("bad snapshot json: {e}"))?;
         if snap.schema != PROTOCOL_SCHEMA {
             return Err(format!(
-                "protocol mismatch (master schema {}, client {})",
+                "protocol mismatch (server schema {}, local {})",
                 snap.schema, PROTOCOL_SCHEMA
             ));
         }

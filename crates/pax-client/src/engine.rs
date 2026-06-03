@@ -45,9 +45,8 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         let c = state.controls.lock();
         (c.account_mode, c.ib_host.clone(), c.ib_port_live, c.ib_port_paper, c.master_url.clone())
     };
-    // Master URL is read at session start from the GUI-editable controls.
     let api = MasterApi::new(&master_url, &cfg.master_api_key);
-    state.log(LogLevel::Info, format!("Master: {master_url}"));
+    state.log(LogLevel::Info, format!("Server: {master_url}"));
     let port = match account_mode {
         AccountMode::Live => port_live,
         AccountMode::Paper => port_paper,
@@ -138,9 +137,10 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
                     .map(|t| t.elapsed() > Duration::from_secs(30))
                     .unwrap_or(true);
                 if warn {
-                    state.log(LogLevel::Warn, format!("Master sync skipped: {e}"));
+                    state.log(LogLevel::Warn, format!("Server sync skipped: {e}"));
                     last_unreachable_warn = Some(Instant::now());
                 }
+                state.with_status(|s| s.master_connected = false);
                 sleep_running(cfg.sync_interval_secs, state);
                 continue;
             }

@@ -121,11 +121,11 @@ fn main() {
                 .into(),
             );
             ui.set_balance_text(format!("Net Liquidation: {}", money(s.client_balance)).into());
-            ui.set_master_text(format!("Master: {}", money(s.master_balance)).into());
+            ui.set_server_text(if s.master_connected { "Server: online" } else { "Server: offline" }.into());
             ui.set_counts_text(
                 format!(
-                    "Positions  M·C {}·{}     Opened {}   Closed {}   Failed {}",
-                    s.master_positions, s.client_positions, s.orders_placed, s.orders_closed, s.orders_failed
+                    "Positions {}     Opened {}   Closed {}   Failed {}",
+                    s.client_positions, s.orders_placed, s.orders_closed, s.orders_failed
                 )
                 .into(),
             );

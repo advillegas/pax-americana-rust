@@ -67,7 +67,7 @@ export component ClientWindow inherits Window {
     in property <bool> running;
     in property <string> status_text: "Stopped";
     in property <string> balance_text: "Net Liquidation: -";
-    in property <string> master_text: "Master: -";
+    in property <string> server_text: "Server: -";
     in property <string> counts_text;
     in property <string> margin_text;
     in property <bool> margin_blocked;
@@ -110,7 +110,7 @@ export component ClientWindow inherits Window {
         HorizontalLayout {
             spacing: 24px;
             Text { text: root.balance_text; color: #34d399; font-weight: 700; }
-            Text { text: root.master_text; color: #53b9f2; }
+            Text { text: root.server_text; color: #53b9f2; }
         }
         Text { text: root.counts_text; color: #909fb7; }
         Text {

@@ -119,7 +119,7 @@ pub fn reconcile(input: &ReconcileInput) -> ReconcileResult {
     // ── Global safety guards ────────────────────────────────────────────────
     if !input.master_connected {
         result.blocked = true;
-        result.blocked_reason = Some("master not connected — sync skipped".to_string());
+        result.blocked_reason = Some("server not connected — sync skipped".to_string());
         return result;
     }
     if input.sizing.ratio().is_none() {
@@ -131,7 +131,7 @@ pub fn reconcile(input: &ReconcileInput) -> ReconcileResult {
     if input.master.is_empty() && input.client.len() > input.empty_master_guard {
         result.blocked = true;
         result.blocked_reason = Some(format!(
-            "master shows 0 positions but client holds {} — refusing mass-close",
+            "server shows 0 positions but local book holds {} — refusing mass-close",
             input.client.len()
         ));
         return result;
