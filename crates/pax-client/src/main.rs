@@ -45,6 +45,7 @@ fn main() {
 
     engine::spawn(cfg.clone(), state.clone());
     spawn_update_check(state.clone());
+    spawn_detect_accounts(state.clone());
 
     let ui = ClientWindow::new().expect("failed to create window");
 
@@ -106,6 +107,10 @@ fn main() {
     }
     {
         let state = state.clone();
+        ui.on_detect_accounts(move || spawn_detect_accounts(state.clone()));
+    }
+    {
+        let state = state.clone();
         ui.on_download_update(move || spawn_self_update(state.clone()));
     }
 
@@ -113,6 +118,7 @@ fn main() {
     {
         let state = state.clone();
         let w = ui.as_weak();
+        let mut last_accounts: Vec<String> = Vec::new();
         timer.start(slint::TimerMode::Repeated, Duration::from_millis(500), move || {
             let Some(ui) = w.upgrade() else { return };
             let s = state.status.lock().clone();
@@ -156,6 +162,17 @@ fn main() {
                 let u = state.update.lock();
                 ui.set_update_text(u.message.clone().into());
                 ui.set_update_available(u.available);
+            }
+            // Refresh the account picker when the detected list changes.
+            let detected = state.detected_accounts.lock().clone();
+            if detected != last_accounts {
+                last_accounts = detected.clone();
+                let model: Vec<slint::SharedString> = detected.iter().map(|a| a.as_str().into()).collect();
+                ui.set_accounts(std::rc::Rc::new(slint::VecModel::from(model)).into());
+                // Auto-select when exactly one account exists and none is chosen yet.
+                if ui.get_account().trim().is_empty() && detected.len() == 1 {
+                    ui.set_account(detected[0].clone().into());
+                }
             }
         });
     }
@@ -267,6 +284,31 @@ fn spawn_self_update(state: std::sync::Arc<SharedState>) {
             Err(e) => {
                 state.update.lock().message = format!("Update failed: {e}");
             }
+        }
+    });
+}
+
+/// Detect the IBKR accounts on the local login (background thread) for the GUI picker.
+fn spawn_detect_accounts(state: std::sync::Arc<SharedState>) {
+    std::thread::spawn(move || {
+        let (mode, host, live, paper) = {
+            let c = state.controls.lock();
+            (c.account_mode, c.ib_host.clone(), c.ib_port_live, c.ib_port_paper)
+        };
+        let port = match mode {
+            AccountMode::Live => live,
+            AccountMode::Paper => paper,
+        };
+        let endpoint = format!("{host}:{port}");
+        let cid = config::stable_client_id().wrapping_add(1);
+        state.log(LogLevel::Info, format!("Detecting accounts on {endpoint}…"));
+        match ib::list_accounts(&endpoint, cid) {
+            Ok(list) => {
+                let msg = if list.is_empty() { "none".to_string() } else { list.join(", ") };
+                *state.detected_accounts.lock() = list;
+                state.log(LogLevel::Ok, format!("Detected accounts: {msg}"));
+            }
+            Err(e) => state.log(LogLevel::Warn, format!("Account detection failed: {e}")),
         }
     });
 }

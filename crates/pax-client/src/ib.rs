@@ -9,6 +9,15 @@ use ibapi::contracts::Contract;
 use ibapi::orders::{Action, Order, Orders, PlaceOrder};
 use pax_core::{OrderKind, Position, Side, WorkingOrder};
 
+/// Connect briefly to the local IB Gateway/TWS and return the accounts this login
+/// manages — used to populate the GUI account picker. The connection drops on return.
+pub fn list_accounts(endpoint: &str, client_id: i32) -> Result<Vec<String>, String> {
+    let client = Client::connect(endpoint, client_id).map_err(|e| e.to_string())?;
+    let mut accts = client.managed_accounts().map_err(|e| e.to_string())?;
+    accts.retain(|a| !a.trim().is_empty());
+    Ok(accts)
+}
+
 /// Snapshot the client's net positions for `account` only (drains until `PositionEnd`).
 /// Positions in any OTHER account the login can access are ignored — critical when a
 /// login manages more than one account.

@@ -84,6 +84,7 @@ export component ClientWindow inherits Window {
     in-out property <string> live_port;
     in-out property <string> paper_port;
     in-out property <string> account;
+    in property <[string]> accounts;
 
     in property <string> update_text;
     in property <bool> update_available;
@@ -95,6 +96,7 @@ export component ClientWindow inherits Window {
     callback kill();
     callback check_update();
     callback download_update();
+    callback detect_accounts();
 
     VerticalLayout {
         padding: 16px;
@@ -181,11 +183,43 @@ export component ClientWindow inherits Window {
             Rectangle { }
         }
         HorizontalLayout {
-            spacing: 8px;
+            spacing: 6px;
             Text { text: "Account"; color: #909fb7; width: 90px; vertical-alignment: center; }
-            LineField { value <=> root.account; width: 160px; }
-            Text { text: "(blank = sole account; required if login has several)"; color: #5a6880; font-size: 11px; vertical-alignment: center; }
+            for a in root.accounts : Rectangle {
+                min-width: 100px;
+                height: 28px;
+                background: a == root.account ? #34445e : #0d1420;
+                border-radius: 6px;
+                border-width: 1px;
+                border-color: a == root.account ? #ff7849 : #222d40;
+                TouchArea { clicked => { root.account = a; } }
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    Text { text: a; color: a == root.account ? white : #909fb7; vertical-alignment: center; font-weight: 700; }
+                }
+            }
+            Rectangle {
+                width: 130px;
+                height: 28px;
+                border-radius: 6px;
+                background: dt.has-hover ? #202c3e : #172130;
+                border-width: 1px;
+                border-color: #222d40;
+                dt := TouchArea { clicked => { root.detect_accounts(); } }
+                Text { text: "Detect Accounts"; color: #909fb7; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+            }
             Rectangle { }
+        }
+        if root.accounts.length == 0 : Text {
+            text: "No accounts detected — set host/port/mode, then Detect Accounts.";
+            color: #5a6880;
+            font-size: 11px;
+        }
+        if root.accounts.length > 1 && root.account == "" : Text {
+            text: "Multiple accounts found — pick one before START.";
+            color: #f5b454;
+            font-size: 11px;
         }
         HorizontalLayout {
             spacing: 10px;

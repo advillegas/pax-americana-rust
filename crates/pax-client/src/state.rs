@@ -141,6 +141,8 @@ pub struct SharedState {
     pub status: Mutex<Status>,
     pub log: Mutex<LogBuffer>,
     pub update: Mutex<UpdateStatus>,
+    /// Accounts detected on the local IB login (for the GUI picker).
+    pub detected_accounts: Mutex<Vec<String>>,
 }
 
 impl SharedState {
@@ -152,6 +154,7 @@ impl SharedState {
             status: Mutex::new(Status::default()),
             log: Mutex::new(LogBuffer::default()),
             update: Mutex::new(UpdateStatus::default()),
+            detected_accounts: Mutex::new(Vec::new()),
         })
     }
 
