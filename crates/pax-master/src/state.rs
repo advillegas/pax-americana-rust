@@ -57,15 +57,6 @@ pub enum IbMode {
     Paper,
 }
 
-impl IbMode {
-    pub fn label(self) -> &'static str {
-        match self {
-            IbMode::Live => "LIVE",
-            IbMode::Paper => "PAPER",
-        }
-    }
-}
-
 /// GUI-editable IB connection parameters.
 #[derive(Debug, Clone)]
 pub struct ConnParams {

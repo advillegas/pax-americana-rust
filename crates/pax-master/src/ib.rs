@@ -18,7 +18,7 @@ use ibapi::orders::{Action, Orders};
 use pax_core::{MasterSnapshot, OrderKind, Position, WorkingOrder, PROTOCOL_SCHEMA};
 
 use crate::config::MasterConfig;
-use crate::state::{now_ms, ConnParams, LogLevel, SharedState};
+use crate::state::{now_ms, ConnParams, IbMode, LogLevel, SharedState};
 
 /// How often to refresh NetLiquidation (positions stream in real time independently).
 const BALANCE_REFRESH_SECS: u64 = 5;
@@ -41,15 +41,15 @@ fn worker_loop(cfg: MasterConfig, state: Arc<SharedState>, stop: Arc<AtomicBool>
         // (re)connect. `gen` lets us notice an Apply/toggle and reconnect.
         let gen = state.reconnect_gen();
         let params = state.conn.lock().clone();
-        let endpoint = params.endpoint();
 
-        // Try the configured clientId first, then fall back through alternates. TWS only
-        // allows ONE connection per clientId; a stale/duplicate session on the same id
-        // (very common with clientId 0, which also binds to manual TWS orders) makes the
-        // socket connect but the API handshake fail ("failed to fill whole buffer"). Rotating
-        // ids recovers automatically instead of retrying the same doomed id forever.
-        let client = match connect_with_fallback(&endpoint, &params, cfg.ib_client_id, &state, &stop)
-        {
+        // Probe IB endpoints until one accepts the API handshake. We rotate both the port
+        // (selected mode first, then the other configured port + TWS/Gateway defaults) and
+        // the clientId. The master is READ-ONLY (it only streams positions/orders and never
+        // places trades), so connecting to whichever IB endpoint is actually open is safe
+        // and frees the operator from guessing Live/Paper or TWS/Gateway port numbers.
+        // Rotating clientIds also recovers from a stale/duplicate session (common on
+        // clientId 0) where the socket connects but the handshake fails.
+        let client = match connect_with_fallback(&params, cfg.ib_client_id, &state, &stop) {
             Some(c) => c,
             None => {
                 mark_disconnected(&state);
@@ -268,48 +268,87 @@ fn client_id_candidates(configured: i32) -> Vec<i32> {
     ids
 }
 
-/// Connect to TWS/Gateway, rotating through clientIds when the API handshake fails so a
-/// stale or duplicate session on one id can't wedge the master forever. Returns `None` if
-/// every candidate failed (caller backs off and retries) or a stop was requested.
+/// Ports to probe, in order: the selected mode's port first, then the other configured
+/// port, then the standard TWS/Gateway defaults. Deduplicated, blanks skipped.
+fn port_candidates(params: &ConnParams) -> Vec<(u16, &'static str)> {
+    let mut out: Vec<(u16, &'static str)> = Vec::new();
+    let mut push = |p: u16, label: &'static str| {
+        if p != 0 && !out.iter().any(|(q, _)| *q == p) {
+            out.push((p, label));
+        }
+    };
+    match params.mode {
+        IbMode::Live => {
+            push(params.port_live, "live");
+            push(params.port_paper, "paper");
+        }
+        IbMode::Paper => {
+            push(params.port_paper, "paper");
+            push(params.port_live, "live");
+        }
+    }
+    push(7496, "TWS live");
+    push(7497, "TWS paper");
+    push(4001, "Gateway live");
+    push(4002, "Gateway paper");
+    out
+}
+
+/// Probe IB endpoints (port × clientId) until one accepts the API handshake. A refused
+/// port is abandoned immediately (nothing is listening); a handshake failure rotates the
+/// clientId on the same port. Returns `None` if nothing reachable or a stop was requested.
 fn connect_with_fallback(
-    endpoint: &str,
     params: &ConnParams,
     configured_id: i32,
     state: &SharedState,
     stop: &AtomicBool,
 ) -> Option<Client> {
-    let candidates = client_id_candidates(configured_id);
-    let last = candidates.len().saturating_sub(1);
-    for (i, cid) in candidates.into_iter().enumerate() {
-        if stop.load(Ordering::Relaxed) {
-            return None;
-        }
-        state.log(
-            LogLevel::Info,
-            format!("Connecting to IB at {endpoint} [{}] (clientId={cid})…", params.mode.label()),
-        );
-        match Client::connect(endpoint, cid) {
-            Ok(c) => {
-                if cid != configured_id {
-                    state.log(
-                        LogLevel::Warn,
-                        format!("clientId {configured_id} was busy — connected on clientId {cid}"),
-                    );
-                }
-                return Some(c);
+    let ids = client_id_candidates(configured_id);
+    let id_last = ids.len().saturating_sub(1);
+    for (port, label) in port_candidates(params) {
+        let endpoint = format!("{}:{}", params.host, port);
+        for (i, &cid) in ids.iter().enumerate() {
+            if stop.load(Ordering::Relaxed) {
+                return None;
             }
-            Err(e) => {
-                state.log(LogLevel::Err, format!("IB connect failed on clientId {cid}: {e}"));
-                // Let TWS settle before trying the next id (skip the wait after the last).
-                if i < last {
-                    sleep_interruptible(1, stop);
+            state.log(
+                LogLevel::Info,
+                format!("Connecting to IB at {endpoint} [{label}] (clientId={cid})…"),
+            );
+            match Client::connect(&endpoint, cid) {
+                Ok(c) => {
+                    state.log(
+                        LogLevel::Ok,
+                        format!("IB connected on {endpoint} [{label}] clientId={cid}"),
+                    );
+                    return Some(c);
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    // Connection refused → nothing on this port; stop trying ids here.
+                    if msg.contains("refused") || msg.contains("10061") {
+                        state.log(
+                            LogLevel::Warn,
+                            format!("No IB listener on {endpoint} — trying next port"),
+                        );
+                        break;
+                    }
+                    state.log(
+                        LogLevel::Err,
+                        format!("IB connect failed on {endpoint} clientId={cid}: {e}"),
+                    );
+                    // Let TWS settle before the next id (skip the wait after the last).
+                    if i < id_last {
+                        sleep_interruptible(1, stop);
+                    }
                 }
             }
         }
     }
     state.log(
         LogLevel::Err,
-        "All clientIds busy/unreachable — is TWS API enabled? Retrying in 10s…".to_string(),
+        "No reachable IB endpoint — check TWS/Gateway is running with API enabled. Retrying in 10s…"
+            .to_string(),
     );
     None
 }
