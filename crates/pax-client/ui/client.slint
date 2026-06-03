@@ -1,0 +1,197 @@
+import { ScrollView } from "std-widgets.slint";
+
+component LineField inherits Rectangle {
+    in-out property <string> value;
+    height: 28px;
+    background: #0d1420;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: #222d40;
+    TextInput {
+        x: 8px;
+        width: parent.width - 16px;
+        height: 100%;
+        vertical-alignment: center;
+        color: #e9f0fb;
+        font-size: 14px;
+        text <=> root.value;
+    }
+}
+
+component Segment inherits Rectangle {
+    in property <bool> active;
+    in property <string> label;
+    callback clicked;
+    height: 28px;
+    background: root.active ? #34445e : #0d1420;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: #222d40;
+    TouchArea { clicked => { root.clicked(); } }
+    Text {
+        text: root.label;
+        color: root.active ? white : #909fb7;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        font-weight: 700;
+    }
+}
+
+component PaxButton inherits Rectangle {
+    in property <string> label;
+    in property <color> fill: #ff7849;
+    callback clicked;
+    height: 32px;
+    border-radius: 8px;
+    background: ta.has-hover ? root.fill.brighter(15%) : root.fill;
+    ta := TouchArea { clicked => { root.clicked(); } }
+    Text {
+        text: root.label;
+        color: #06080d;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component ClientWindow inherits Window {
+    title: "Pax Americana - Client";
+    default-font-size: 14px;
+    preferred-width: 720px;
+    preferred-height: 780px;
+    min-width: 600px;
+    min-height: 600px;
+    background: #0a0e16;
+
+    in property <bool> connected;
+    in property <bool> running;
+    in property <string> status_text: "Stopped";
+    in property <string> balance_text: "Net Liquidation: -";
+    in property <string> master_text: "Master: -";
+    in property <string> counts_text;
+    in property <string> log_text;
+
+    in-out property <int> account_mode;   // 0 live, 1 paper
+    in-out property <int> trade_mode;      // 0 long&short, 1 long only
+    in-out property <int> exec_mode;       // 0 existing+new, 1 new only
+    in-out property <string> multiplier;
+    in-out property <string> drawdown;
+    in-out property <string> max_notional;
+    in-out property <string> max_qty;
+    in-out property <string> host;
+    in-out property <string> live_port;
+    in-out property <string> paper_port;
+
+    callback start();
+    callback stop();
+    callback close_all();
+    callback save();
+    callback kill();
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 8px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "⬢ PAX AMERICANA"; color: #ff7849; font-size: 20px; font-weight: 800; }
+            Text { text: "CLIENT"; color: #3d8af7; font-size: 13px; font-weight: 700; vertical-alignment: center; }
+            Rectangle { }
+            Text {
+                text: root.status_text;
+                color: root.connected ? #34d399 : #fb5d6e;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+        }
+        Rectangle { height: 1px; background: #222d40; }
+        HorizontalLayout {
+            spacing: 24px;
+            Text { text: root.balance_text; color: #34d399; font-weight: 700; }
+            Text { text: root.master_text; color: #53b9f2; }
+        }
+        Text { text: root.counts_text; color: #909fb7; }
+
+        Text { text: "ENGINE"; color: #909fb7; font-size: 11px; font-weight: 700; }
+        HorizontalLayout {
+            spacing: 10px;
+            PaxButton { label: root.running ? "▶ RUNNING" : "▶ START"; fill: #34d399; width: 120px; clicked => { root.start(); } }
+            PaxButton { label: "■ STOP"; fill: #fb5d6e; width: 100px; clicked => { root.stop(); } }
+            PaxButton { label: "CLOSE ALL"; fill: #f5b454; width: 120px; clicked => { root.close_all(); } }
+            PaxButton { label: "KILL OTHERS"; fill: #c97a3f; width: 130px; clicked => { root.kill(); } }
+            Rectangle { }
+        }
+
+        Text { text: "SETTINGS"; color: #909fb7; font-size: 11px; font-weight: 700; }
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "Account"; color: #909fb7; width: 70px; vertical-alignment: center; }
+            Segment { label: "Live"; active: root.account_mode == 0; width: 70px; clicked => { root.account_mode = 0; } }
+            Segment { label: "Paper"; active: root.account_mode == 1; width: 70px; clicked => { root.account_mode = 1; } }
+            Rectangle { width: 12px; }
+            Text { text: "Trading"; color: #909fb7; width: 60px; vertical-alignment: center; }
+            Segment { label: "Long & Short"; active: root.trade_mode == 0; width: 110px; clicked => { root.trade_mode = 0; } }
+            Segment { label: "Long Only"; active: root.trade_mode == 1; width: 100px; clicked => { root.trade_mode = 1; } }
+            Rectangle { }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "Execution"; color: #909fb7; width: 70px; vertical-alignment: center; }
+            Segment { label: "Existing + New"; active: root.exec_mode == 0; width: 130px; clicked => { root.exec_mode = 0; } }
+            Segment { label: "New Only"; active: root.exec_mode == 1; width: 100px; clicked => { root.exec_mode = 1; } }
+            Rectangle { }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "Multiplier x"; color: #909fb7; width: 90px; vertical-alignment: center; }
+            LineField { value <=> root.multiplier; width: 80px; }
+            Text { text: "Max Drawdown %"; color: #909fb7; width: 120px; vertical-alignment: center; }
+            LineField { value <=> root.drawdown; width: 80px; }
+            Rectangle { }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "Max Pos $"; color: #909fb7; width: 90px; vertical-alignment: center; }
+            LineField { value <=> root.max_notional; width: 100px; }
+            Text { text: "Max Pos Qty"; color: #909fb7; width: 120px; vertical-alignment: center; }
+            LineField { value <=> root.max_qty; width: 100px; }
+            Rectangle { }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "IB Host"; color: #909fb7; width: 90px; vertical-alignment: center; }
+            LineField { value <=> root.host; width: 160px; }
+            Text { text: "Live"; color: #909fb7; width: 32px; vertical-alignment: center; }
+            LineField { value <=> root.live_port; width: 80px; }
+            Text { text: "Paper"; color: #909fb7; width: 44px; vertical-alignment: center; }
+            LineField { value <=> root.paper_port; width: 80px; }
+            Rectangle { }
+        }
+        HorizontalLayout {
+            spacing: 10px;
+            PaxButton { label: "SAVE SETTINGS"; width: 160px; clicked => { root.save(); } }
+            Text { text: "Modes/risk apply live; host & ports apply on START."; color: #5a6880; font-size: 11px; vertical-alignment: center; }
+        }
+
+        Text { text: "LIVE ORDER FEED"; color: #909fb7; font-size: 11px; font-weight: 700; }
+        Rectangle {
+            vertical-stretch: 1;
+            background: #0d1420;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #222d40;
+            ScrollView {
+                VerticalLayout {
+                    padding: 8px;
+                    Text {
+                        text: root.log_text;
+                        color: #cfe3ff;
+                        font-family: "Consolas";
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+}

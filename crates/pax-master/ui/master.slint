@@ -1,0 +1,168 @@
+import { ScrollView } from "std-widgets.slint";
+
+// ── reusable themed pieces ──────────────────────────────────────────────────
+component LineField inherits Rectangle {
+    in-out property <string> value;
+    height: 28px;
+    background: #0d1420;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: #222d40;
+    TextInput {
+        x: 8px;
+        width: parent.width - 16px;
+        height: 100%;
+        vertical-alignment: center;
+        color: #e9f0fb;
+        font-size: 14px;
+        text <=> root.value;
+    }
+}
+
+component Segment inherits Rectangle {
+    in property <bool> active;
+    in property <string> label;
+    callback clicked;
+    height: 28px;
+    background: root.active ? #34445e : #0d1420;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: #222d40;
+    TouchArea { clicked => { root.clicked(); } }
+    Text {
+        text: root.label;
+        color: root.active ? white : #909fb7;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        font-weight: 700;
+    }
+}
+
+component PaxButton inherits Rectangle {
+    in property <string> label;
+    in property <color> fill: #ff7849;
+    callback clicked;
+    height: 32px;
+    border-radius: 8px;
+    background: ta.has-hover ? root.fill.brighter(15%) : root.fill;
+    ta := TouchArea { clicked => { root.clicked(); } }
+    Text {
+        text: root.label;
+        color: #06080d;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component FieldRow inherits HorizontalLayout {
+    in property <string> caption;
+    in-out property <string> value;
+    spacing: 8px;
+    Text { text: root.caption; color: #909fb7; width: 90px; vertical-alignment: center; }
+    LineField { value <=> root.value; }
+}
+
+// ── window ──────────────────────────────────────────────────────────────────
+export component MasterWindow inherits Window {
+    title: "Pax Americana - Master";
+    default-font-size: 14px;
+    preferred-width: 680px;
+    preferred-height: 600px;
+    min-width: 560px;
+    min-height: 520px;
+    background: #0a0e16;
+
+    in property <bool> connected;
+    in property <string> status_text: "Connecting...";
+    in property <string> account_text: "Account: -";
+    in property <string> balance_text: "Net Liquidation: -";
+    in property <string> positions_text: "Positions: 0";
+    in property <string> log_text;
+
+    in-out property <string> host;
+    in-out property <string> live_port;
+    in-out property <string> paper_port;
+    in-out property <int> mode;   // 0 = Live, 1 = Paper
+
+    callback apply();
+    callback kill();
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 8px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "⬢ PAX AMERICANA"; color: #ff7849; font-size: 20px; font-weight: 800; }
+            Text { text: "MASTER"; color: #3d8af7; font-size: 13px; font-weight: 700; vertical-alignment: center; }
+            Rectangle { }
+            Text {
+                text: root.status_text;
+                color: root.connected ? #34d399 : #fb5d6e;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+        }
+
+        Rectangle {
+            height: 1px;
+            background: #222d40;
+        }
+
+        HorizontalLayout {
+            spacing: 24px;
+            Text { text: root.account_text; color: #e9f0fb; }
+            Text { text: root.balance_text; color: #34d399; font-weight: 700; }
+            Text { text: root.positions_text; color: #53b9f2; }
+        }
+
+        Text { text: "CONNECTION"; color: #909fb7; font-size: 11px; font-weight: 700; }
+        FieldRow { caption: "IB Host"; value <=> root.host; }
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "Live port"; color: #909fb7; width: 90px; vertical-alignment: center; }
+            LineField { value <=> root.live_port; width: 90px; }
+            Text { text: "Paper port"; color: #909fb7; width: 80px; vertical-alignment: center; }
+            LineField { value <=> root.paper_port; width: 90px; }
+            Rectangle { }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "Mode"; color: #909fb7; width: 90px; vertical-alignment: center; }
+            Segment { label: "Live"; active: root.mode == 0; width: 90px; clicked => { root.mode = 0; } }
+            Segment { label: "Paper"; active: root.mode == 1; width: 90px; clicked => { root.mode = 1; } }
+            Rectangle { }
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            PaxButton { label: "APPLY & RECONNECT"; width: 200px; clicked => { root.apply(); } }
+            PaxButton { label: "KILL OTHER INSTANCES"; fill: #f5b454; width: 200px; clicked => { root.kill(); } }
+            Rectangle { }
+        }
+
+        Text { text: "TWS 7496 live / 7497 paper   -   Gateway 4001 / 4002"; color: #5a6880; font-size: 11px; }
+        Text { text: "LOG"; color: #909fb7; font-size: 11px; font-weight: 700; }
+
+        Rectangle {
+            vertical-stretch: 1;
+            background: #0d1420;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #222d40;
+            ScrollView {
+                VerticalLayout {
+                    padding: 8px;
+                    Text {
+                        text: root.log_text;
+                        color: #cfe3ff;
+                        font-family: "Consolas";
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+}

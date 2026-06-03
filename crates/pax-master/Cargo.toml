@@ -15,4 +15,7 @@ tracing-subscriber = { workspace = true }
 parking_lot = { workspace = true }
 ibapi = { workspace = true }
 tiny_http = "0.12"
-native-windows-gui = "1.0.13"
+slint = { version = "1.16", default-features = false, features = ["compat-1-2", "std", "backend-winit", "renderer-software"] }
+
+[build-dependencies]
+slint-build = "1.16"

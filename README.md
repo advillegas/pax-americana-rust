@@ -144,11 +144,11 @@ netsh advfirewall firewall add rule name="PaxAmericana" dir=in action=allow prot
 
 ## Run
 
-**Master** (`pax-master.exe`) — a single standalone Windows executable with a **native
-Win32 GUI** that renders on any Windows machine, including RDP/VPS sessions (GDI, no
-OpenGL/GPU required). The window shows connection status, balance, position count, and a
-live log, and lets you edit **Host / Live port / Paper port / Mode** with **APPLY &
-RECONNECT**. It also serves the HTTP data API the client polls: `GET /snapshot`,
+**Master** (`pax-master.exe`) — a single standalone Windows executable with a themed
+**Slint GUI** rendered in **software** (CPU, no OpenGL/GPU), so the window renders on any
+Windows machine including RDP/VPS sessions. It shows connection status, balance, position
+count, and a live log, and lets you edit **Host / Live port / Paper port / Mode** with
+**APPLY & RECONNECT**. It also serves the HTTP data API the client polls: `GET /snapshot`,
 `GET /status`, `GET /balance` (protected by `X-API-Key` when `PAX_API_KEY` is set).
 
 **Kill switch:** the master kills any other instances of itself on launch (so stale
@@ -156,7 +156,7 @@ copies can't clog the port), and the **KILL OTHER INSTANCES** button does the sa
 demand. Closing the window exits the process fully.
 
 **Client(s)** (`pax-client.exe`) — a single standalone Windows executable with the same
-native Win32 GUI. Pick **Live/Paper**, set the **multiplier** / **max drawdown** / trading
+themed software-rendered Slint GUI. Pick **Live/Paper**, set the **multiplier** / **max drawdown** / trading
 & execution modes, edit the IB host/ports, then **SAVE SETTINGS** and **START**.
 **CLOSE ALL** cancels working orders and flattens every client position with market
 orders. Host/ports/account apply on START; multiplier/drawdown/modes apply live. Same
