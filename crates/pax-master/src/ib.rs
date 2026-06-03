@@ -18,7 +18,7 @@ use ibapi::orders::{Action, Orders};
 use pax_core::{MasterSnapshot, OrderKind, Position, WorkingOrder, PROTOCOL_SCHEMA};
 
 use crate::config::MasterConfig;
-use crate::state::{now_ms, LogLevel, SharedState};
+use crate::state::{now_ms, ConnParams, LogLevel, SharedState};
 
 /// How often to refresh NetLiquidation (positions stream in real time independently).
 const BALANCE_REFRESH_SECS: u64 = 5;
@@ -42,19 +42,16 @@ fn worker_loop(cfg: MasterConfig, state: Arc<SharedState>, stop: Arc<AtomicBool>
         let gen = state.reconnect_gen();
         let params = state.conn.lock().clone();
         let endpoint = params.endpoint();
-        state.log(
-            LogLevel::Info,
-            format!(
-                "Connecting to IB at {endpoint} [{}] (clientId={})…",
-                params.mode.label(),
-                cfg.ib_client_id
-            ),
-        );
 
-        let client = match Client::connect(&endpoint, cfg.ib_client_id) {
-            Ok(c) => c,
-            Err(e) => {
-                state.log(LogLevel::Err, format!("IB connect failed: {e}. Retrying in 10s…"));
+        // Try the configured clientId first, then fall back through alternates. TWS only
+        // allows ONE connection per clientId; a stale/duplicate session on the same id
+        // (very common with clientId 0, which also binds to manual TWS orders) makes the
+        // socket connect but the API handshake fail ("failed to fill whole buffer"). Rotating
+        // ids recovers automatically instead of retrying the same doomed id forever.
+        let client = match connect_with_fallback(&endpoint, &params, cfg.ib_client_id, &state, &stop)
+        {
+            Some(c) => c,
+            None => {
                 mark_disconnected(&state);
                 sleep_interruptible(10, &stop);
                 continue;
@@ -257,6 +254,64 @@ fn sleep_interruptible(secs: u64, stop: &AtomicBool) {
         thread::sleep(Duration::from_millis(250));
         remaining -= 1;
     }
+}
+
+/// Candidate clientIds to try, in order: the configured one first, then low alternates.
+/// (Master alternates stay low; clients hash into 21..=999, so they never collide here.)
+fn client_id_candidates(configured: i32) -> Vec<i32> {
+    let mut ids = vec![configured];
+    for c in [1, 2, 3, 4, 5, 10] {
+        if !ids.contains(&c) {
+            ids.push(c);
+        }
+    }
+    ids
+}
+
+/// Connect to TWS/Gateway, rotating through clientIds when the API handshake fails so a
+/// stale or duplicate session on one id can't wedge the master forever. Returns `None` if
+/// every candidate failed (caller backs off and retries) or a stop was requested.
+fn connect_with_fallback(
+    endpoint: &str,
+    params: &ConnParams,
+    configured_id: i32,
+    state: &SharedState,
+    stop: &AtomicBool,
+) -> Option<Client> {
+    let candidates = client_id_candidates(configured_id);
+    let last = candidates.len().saturating_sub(1);
+    for (i, cid) in candidates.into_iter().enumerate() {
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        state.log(
+            LogLevel::Info,
+            format!("Connecting to IB at {endpoint} [{}] (clientId={cid})…", params.mode.label()),
+        );
+        match Client::connect(endpoint, cid) {
+            Ok(c) => {
+                if cid != configured_id {
+                    state.log(
+                        LogLevel::Warn,
+                        format!("clientId {configured_id} was busy — connected on clientId {cid}"),
+                    );
+                }
+                return Some(c);
+            }
+            Err(e) => {
+                state.log(LogLevel::Err, format!("IB connect failed on clientId {cid}: {e}"));
+                // Let TWS settle before trying the next id (skip the wait after the last).
+                if i < last {
+                    sleep_interruptible(1, stop);
+                }
+            }
+        }
+    }
+    state.log(
+        LogLevel::Err,
+        "All clientIds busy/unreachable — is TWS API enabled? Retrying in 10s…".to_string(),
+    );
+    None
 }
 
 fn nonempty(s: String, fallback: &str) -> String {

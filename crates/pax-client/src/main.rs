@@ -45,7 +45,7 @@ fn main() {
         // Saved settings (if any) override the env/config defaults.
         persist::load_into(&mut c);
     }
-    state.log(LogLevel::Info, format!("Pax Americana ready. Master: {}", cfg.master_url));
+    state.log(LogLevel::Info, "Pax Americana ready.".to_string());
 
     engine::spawn(cfg.clone(), state.clone());
     spawn_update_check(state.clone());

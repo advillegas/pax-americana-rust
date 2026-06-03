@@ -48,7 +48,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         (c.account_mode, c.ib_host.clone(), c.ib_port_live, c.ib_port_paper, c.master_url.clone())
     };
     let api = MasterApi::new(&master_url, &cfg.master_api_key);
-    state.log(LogLevel::Info, format!("Server: {master_url}"));
+    state.log(LogLevel::Info, "Connecting to server…".to_string());
     let port = match account_mode {
         AccountMode::Live => port_live,
         AccountMode::Paper => port_paper,
