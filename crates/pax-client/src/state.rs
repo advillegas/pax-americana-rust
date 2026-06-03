@@ -150,18 +150,36 @@ pub struct PortfolioRow {
     pub unrealized_pnl: f64,
 }
 
-/// Precomputed chart view (the data thread builds the path + labels off the UI thread).
+/// One candlestick's geometry, normalized to a 0..100 box (y inverted: 0 = top = max price).
+#[derive(Default, Clone)]
+pub struct Candle {
+    pub cx: f32,     // body/wick center x (0..100)
+    pub bw: f32,     // body width (0..100)
+    pub high_y: f32, // wick top
+    pub low_y: f32,  // wick bottom
+    pub top_y: f32,  // body top (higher price)
+    pub bot_y: f32,  // body bottom (lower price)
+    pub up: bool,    // close >= open
+}
+
+/// Precomputed chart view (the data thread builds candle geometry off the UI thread).
 #[derive(Default, Clone)]
 pub struct ChartView {
     pub symbol: String,
     pub status: String,
-    /// SVG-style path command string in a 0..100 viewbox (y already inverted).
-    pub path: String,
+    pub candles: Vec<Candle>,
+    /// Price range mapped onto the 0..100 box (for the crosshair price readout).
+    pub min_val: f32,
+    pub max_val: f32,
     pub min_label: String,
     pub max_label: String,
     pub last_label: String,
-    /// True when the period closed up (line shown green vs red).
+    /// True when the period closed up.
     pub up: bool,
+    /// The open-position average cost, charted as a horizontal line when present.
+    pub avg_present: bool,
+    pub avg_y: f32,
+    pub avg_label: String,
 }
 
 pub struct SharedState {

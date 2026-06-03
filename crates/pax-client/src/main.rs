@@ -235,18 +235,36 @@ fn main() {
                 }
             }
 
-            // ── Chart (copy precomputed path/labels when they change) ─────────
+            // ── Chart (copy precomputed candles/labels when they change) ──────
             {
                 let c = state.chart.lock().clone();
-                let sig = format!("{}|{}|{}", c.symbol, c.status, c.path.len());
+                let sig = format!("{}|{}|{}|{}", c.symbol, c.status, c.candles.len(), c.last_label);
                 if sig != last_chart_sig {
                     last_chart_sig = sig;
+                    let model: Vec<Candle> = c
+                        .candles
+                        .iter()
+                        .map(|k| Candle {
+                            cx: k.cx,
+                            bw: k.bw,
+                            high_y: k.high_y,
+                            low_y: k.low_y,
+                            top_y: k.top_y,
+                            bot_y: k.bot_y,
+                            up: k.up,
+                        })
+                        .collect();
+                    ui.set_candles(std::rc::Rc::new(slint::VecModel::from(model)).into());
                     ui.set_chart_status(c.status.into());
-                    ui.set_chart_path(c.path.into());
                     ui.set_chart_min(c.min_label.into());
                     ui.set_chart_max(c.max_label.into());
                     ui.set_chart_last(c.last_label.into());
                     ui.set_chart_up(c.up);
+                    ui.set_chart_min_val(c.min_val);
+                    ui.set_chart_max_val(c.max_val);
+                    ui.set_avg_present(c.avg_present);
+                    ui.set_avg_y(c.avg_y);
+                    ui.set_avg_label(c.avg_label.into());
                 }
             }
 

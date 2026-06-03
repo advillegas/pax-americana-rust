@@ -19,7 +19,7 @@ use ibapi::market_data::historical::{BarSize, Duration as HDuration, WhatToShow}
 use ibapi::market_data::TradingHours;
 
 use crate::config::{stable_client_id, ClientConfig};
-use crate::state::{AccountMode, ChartView, LogLevel, PortfolioRow, SharedState};
+use crate::state::{AccountMode, Candle, ChartView, LogLevel, PortfolioRow, SharedState};
 
 pub fn spawn(cfg: ClientConfig, state: Arc<SharedState>) {
     thread::spawn(move || data_main(cfg, state));
@@ -122,9 +122,12 @@ fn data_main(_cfg: ClientConfig, state: Arc<SharedState>) {
             if state.chart_request.swap(false, Ordering::Relaxed) {
                 let symbol = state.chart_symbol.lock().clone();
                 let tf = state.chart_tf.load(Ordering::Relaxed);
-                if !symbol.trim().is_empty() {
-                    state.chart.lock().status = format!("Loading {symbol}…");
-                    let view = load_chart(&client, symbol.trim(), tf);
+                let sym = symbol.trim().to_string();
+                if !sym.is_empty() {
+                    // Chart the open-position average cost if we hold the symbol.
+                    let avg = book.get(&sym).map(|r| r.avg_cost).filter(|c| *c > 0.0);
+                    state.chart.lock().status = format!("Loading {sym}…");
+                    let view = load_chart(&client, &sym, tf, avg);
                     *state.chart.lock() = view;
                 }
             }
@@ -151,8 +154,9 @@ fn timeframe(tf: u8) -> (BarSize, HDuration, &'static str) {
     }
 }
 
-/// Fetch bars and build the chart view (path string + labels) for `symbol`.
-fn load_chart(client: &Client, symbol: &str, tf: u8) -> ChartView {
+/// Fetch bars and build the candlestick chart view for `symbol`. `avg` (open-position
+/// average cost) is charted as a horizontal line and folded into the price range.
+fn load_chart(client: &Client, symbol: &str, tf: u8, avg: Option<f64>) -> ChartView {
     let (bar_size, duration, label) = timeframe(tf);
     let contract = Contract::stock(symbol).on_exchange("SMART").in_currency("USD").build();
 
@@ -167,8 +171,8 @@ fn load_chart(client: &Client, symbol: &str, tf: u8) -> ChartView {
         }
     };
 
-    let closes: Vec<f64> = hd.bars.iter().map(|b| b.close).collect();
-    if closes.len() < 2 {
+    let bars = &hd.bars;
+    if bars.len() < 2 {
         return ChartView {
             symbol: symbol.to_string(),
             status: format!("{symbol}: no data (market-data permissions?)"),
@@ -176,33 +180,54 @@ fn load_chart(client: &Client, symbol: &str, tf: u8) -> ChartView {
         };
     }
 
-    let min = closes.iter().cloned().fold(f64::INFINITY, f64::min);
-    let max = closes.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let span = (max - min).max(1e-9);
-    let n = closes.len();
-
-    // Build a polyline in a 0..100 viewbox; y is inverted so higher price is higher up.
-    let mut path = String::with_capacity(n * 12);
-    for (i, c) in closes.iter().enumerate() {
-        let x = (i as f64) / ((n - 1) as f64) * 100.0;
-        let y = 100.0 - ((c - min) / span * 100.0);
-        path.push_str(if i == 0 { "M " } else { "L " });
-        path.push_str(&format!("{x:.2} {y:.2} "));
+    // Price range spans the wicks (low..high), and the avg line if we hold the position.
+    let mut lo = bars.iter().map(|b| b.low).fold(f64::INFINITY, f64::min);
+    let mut hi = bars.iter().map(|b| b.high).fold(f64::NEG_INFINITY, f64::max);
+    if let Some(a) = avg {
+        lo = lo.min(a);
+        hi = hi.max(a);
     }
+    let span = (hi - lo).max(1e-9);
+    let y_of = |p: f64| (100.0 - (p - lo) / span * 100.0) as f32;
 
-    let first = closes[0];
-    let last = *closes.last().unwrap();
-    let chg = last - first;
-    let chg_pct = if first.abs() > 1e-9 { chg / first * 100.0 } else { 0.0 };
+    let n = bars.len();
+    let slot = 100.0 / n as f64;
+    let bw = (slot * 0.7) as f32;
+    let candles: Vec<Candle> = bars
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let top = b.open.max(b.close); // higher price → smaller y
+            let bot = b.open.min(b.close);
+            Candle {
+                cx: ((i as f64 + 0.5) * slot) as f32,
+                bw,
+                high_y: y_of(b.high),
+                low_y: y_of(b.low),
+                top_y: y_of(top),
+                bot_y: y_of(bot),
+                up: b.close >= b.open,
+            }
+        })
+        .collect();
+
+    let first = bars[0].close;
+    let last = bars.last().unwrap().close;
+    let chg_pct = if first.abs() > 1e-9 { (last - first) / first * 100.0 } else { 0.0 };
 
     ChartView {
         symbol: symbol.to_string(),
         status: format!("{symbol} · {label} · {n} bars"),
-        path,
-        min_label: format!("{min:.2}"),
-        max_label: format!("{max:.2}"),
-        last_label: format!("{last:.2}  ({:+.2}%)", chg_pct),
+        candles,
+        min_val: lo as f32,
+        max_val: hi as f32,
+        min_label: format!("{lo:.2}"),
+        max_label: format!("{hi:.2}"),
+        last_label: format!("{last:.2}  ({chg_pct:+.2}%)"),
         up: last >= first,
+        avg_present: avg.is_some(),
+        avg_y: avg.map(y_of).unwrap_or(0.0),
+        avg_label: avg.map(|a| format!("avg {a:.2}")).unwrap_or_default(),
     }
 }
 

@@ -10,6 +10,16 @@ struct PortRow {
     up: bool,
 }
 
+struct Candle {
+    cx: float,     // center x (0..100)
+    bw: float,     // body width (0..100)
+    high_y: float, // wick top (0..100, 0 = top)
+    low_y: float,  // wick bottom
+    top_y: float,  // body top
+    bot_y: float,  // body bottom
+    up: bool,
+}
+
 component LineField inherits Rectangle {
     in-out property <string> value;
     height: 28px;
@@ -112,11 +122,16 @@ export component ClientWindow inherits Window {
     in-out property <string> chart_symbol;
     in-out property <int> chart_tf;        // 0 1D, 1 1W, 2 1M, 3 6M, 4 1Y
     in property <string> chart_status;
-    in property <string> chart_path;
+    in property <[Candle]> candles;
+    in property <float> chart_min_val;
+    in property <float> chart_max_val;
     in property <string> chart_min;
     in property <string> chart_max;
     in property <string> chart_last;
     in property <bool> chart_up;
+    in property <bool> avg_present;
+    in property <float> avg_y;
+    in property <string> avg_label;
 
     callback start();
     callback stop();
@@ -424,35 +439,92 @@ export component ClientWindow inherits Window {
                 border-color: #222d40;
                 clip: true;
 
-                // Price axis labels
-                Text { x: 10px; y: 8px; text: root.chart_max; color: #5a6880; font-size: 11px; }
-                Text { x: 10px; y: parent.height - 22px; text: root.chart_min; color: #5a6880; font-size: 11px; }
+                // Right-edge price axis labels.
+                Text { x: parent.width - 64px; y: 8px; text: root.chart_max; color: #5a6880; font-size: 11px; }
+                Text { x: parent.width - 64px; y: parent.height - 20px; text: root.chart_min; color: #5a6880; font-size: 11px; }
                 Text {
-                    x: parent.width - self.width - 12px;
-                    y: 8px;
+                    x: 12px; y: 8px;
                     text: root.chart_last;
                     color: root.chart_up ? #34d399 : #fb5d6e;
                     font-size: 13px;
                     font-weight: 700;
                 }
 
-                // The line itself (padded inside the box).
-                Rectangle {
-                    x: 8px; y: 26px;
-                    width: parent.width - 16px;
-                    height: parent.height - 40px;
-                    Path {
+                // Plot area (inset; leaves room for the right price axis).
+                plot := Rectangle {
+                    x: 8px; y: 28px;
+                    width: parent.width - 70px;
+                    height: parent.height - 44px;
+                    clip: true;
+
+                    property <float> cursor_price:
+                        root.chart_max_val - (cross.mouse-y / self.height) * (root.chart_max_val - root.chart_min_val);
+
+                    // Average-cost line for the open position.
+                    if root.avg_present : Rectangle {
+                        x: 0;
                         width: 100%;
-                        height: 100%;
-                        viewbox-x: 0; viewbox-y: 0;
-                        viewbox-width: 100; viewbox-height: 100;
-                        commands: root.chart_path;
-                        stroke: root.chart_up ? #34d399 : #fb5d6e;
-                        stroke-width: 1.4px;
+                        y: parent.height * (root.avg_y / 100) - 1px;
+                        height: 2px;
+                        background: #f5b454;
+                    }
+                    if root.avg_present : Text {
+                        x: 4px;
+                        y: parent.height * (root.avg_y / 100) - 14px;
+                        text: root.avg_label;
+                        color: #f5b454;
+                        font-size: 11px;
+                        font-weight: 700;
+                    }
+
+                    // Candlesticks.
+                    for c in root.candles : Rectangle {
+                        // wick
+                        Rectangle {
+                            x: parent.width * (c.cx / 100) - 0.5px;
+                            y: parent.height * (c.high_y / 100);
+                            width: 1px;
+                            height: max(1px, parent.height * ((c.low_y - c.high_y) / 100));
+                            background: c.up ? #34d399 : #fb5d6e;
+                        }
+                        // body
+                        Rectangle {
+                            x: parent.width * ((c.cx - c.bw / 2) / 100);
+                            y: parent.height * (c.top_y / 100);
+                            width: max(1px, parent.width * (c.bw / 100));
+                            height: max(1px, parent.height * ((c.bot_y - c.top_y) / 100));
+                            background: c.up ? #34d399 : #fb5d6e;
+                        }
+                    }
+
+                    // Crosshair + price readout on hover.
+                    cross := TouchArea { }
+                    if cross.has-hover : Rectangle {
+                        x: cross.mouse-x; width: 1px; height: 100%; background: #ffffff40;
+                    }
+                    if cross.has-hover : Rectangle {
+                        y: cross.mouse-y; width: 100%; height: 1px; background: #ffffff40;
+                    }
+                    if cross.has-hover : Rectangle {
+                        x: parent.width - self.width;
+                        y: cross.mouse-y - 9px;
+                        width: 58px; height: 18px;
+                        background: #11192a;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: #2a3a55;
+                        Text {
+                            text: round(plot.cursor_price * 100) / 100;
+                            color: #e9f0fb;
+                            font-size: 11px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
                     }
                 }
-                if root.chart_path == "" : Text {
-                    x: 12px; y: 30px;
+
+                if root.candles.length == 0 : Text {
+                    x: 12px; y: 32px;
                     text: "Enter a symbol and press LOAD (US stocks, SMART routing).";
                     color: #5a6880;
                     font-size: 12px;
