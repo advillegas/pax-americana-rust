@@ -178,9 +178,21 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
     // changes these locked targets/orders are held so balance/price drift never triggers
     // a resize (which would rack up commissions). Recomputed proportionally to the CURRENT
     // balances at the instant the master adjusts.
-    let mut last_fingerprint: Option<String> = None;
-    let mut locked_targets: BTreeMap<String, f64> = BTreeMap::new();
-    let mut locked_desired: Vec<WorkingOrder> = Vec::new();
+    // Resume from the persisted ledger (if it belongs to this account) so a restart does
+    // NOT recompute/resize a book that already matches — only a real master change since
+    // the ledger was written will trigger a resize.
+    let (mut last_fingerprint, mut locked_targets, mut locked_desired) =
+        match crate::ledger::load(&account) {
+            Some(l) => {
+                state.log(
+                    LogLevel::Ok,
+                    format!("Resumed saved ledger ({} targets) — no resize unless the server changed.", l.targets.len()),
+                );
+                (l.fingerprint, l.targets, l.desired)
+            }
+            None => (None, BTreeMap::<String, f64>::new(), Vec::<WorkingOrder>::new()),
+        };
+    let mut last_ledger_save = Instant::now();
 
     while state.is_running() {
         // ── periodic license re-check (revocation stops trading) ──────────────
@@ -386,6 +398,10 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
                     state.log(LogLevel::Info, "Master ledger changed — targets re-synced.".to_string());
                 }
                 last_fingerprint = Some(fp);
+                // Persist the new locked structure right away so a restart immediately after
+                // a master change resumes the new targets, not the stale ones.
+                crate::ledger::save(&account, &last_fingerprint, &locked_targets, &locked_desired);
+                last_ledger_save = Instant::now();
             }
         }
 
@@ -574,9 +590,17 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             }
         }
 
+        // Persist the ledger on a 15s cadence so the matched state survives a crash/restart.
+        if last_ledger_save.elapsed() >= Duration::from_secs(15) {
+            crate::ledger::save(&account, &last_fingerprint, &locked_targets, &locked_desired);
+            last_ledger_save = Instant::now();
+        }
+
         sleep_running(cfg.sync_interval_secs, state);
     }
 
+    // Save once more on a clean stop so the latest matched state is on disk.
+    crate::ledger::save(&account, &last_fingerprint, &locked_targets, &locked_desired);
     state.log(LogLevel::Warn, "Engine session ended.");
 }
 
