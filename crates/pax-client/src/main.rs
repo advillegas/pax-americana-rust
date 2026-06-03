@@ -11,6 +11,7 @@
 
 mod appdata;
 mod config;
+mod data;
 mod engine;
 mod ib;
 mod ledger;
@@ -51,6 +52,7 @@ fn main() {
     state.log(LogLevel::Info, "Pax Americana ready.".to_string());
 
     engine::spawn(cfg.clone(), state.clone());
+    data::spawn(cfg.clone(), state.clone());
     spawn_update_check(state.clone());
     spawn_detect_accounts(state.clone());
 
@@ -121,12 +123,37 @@ fn main() {
         let state = state.clone();
         ui.on_download_update(move || spawn_self_update(state.clone()));
     }
+    {
+        let state = state.clone();
+        let w = ui.as_weak();
+        ui.on_load_chart(move || {
+            if let Some(ui) = w.upgrade() {
+                *state.chart_symbol.lock() = ui.get_chart_symbol().trim().to_uppercase();
+                state.chart_tf.store(ui.get_chart_tf() as u8, std::sync::atomic::Ordering::Relaxed);
+                state.chart_request.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let w = ui.as_weak();
+        ui.on_view_symbol(move |sym| {
+            if let Some(ui) = w.upgrade() {
+                ui.set_chart_symbol(sym.clone());
+                ui.set_active_tab(2);
+                *state.chart_symbol.lock() = sym.to_string();
+                state.chart_request.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+    }
 
     let timer = slint::Timer::default();
     {
         let state = state.clone();
         let w = ui.as_weak();
         let mut last_accounts: Vec<String> = Vec::new();
+        let mut last_port_sig = String::new();
+        let mut last_chart_sig = String::new();
         timer.start(slint::TimerMode::Repeated, Duration::from_millis(500), move || {
             let Some(ui) = w.upgrade() else { return };
             let s = state.status.lock().clone();
@@ -173,6 +200,56 @@ fn main() {
                 ui.set_update_text(u.message.clone().into());
                 ui.set_update_available(u.available);
             }
+            // ── Portfolio table (rebuild only when the data changed) ──────────
+            ui.set_data_connected(state.data_connected.load(std::sync::atomic::Ordering::Relaxed));
+            {
+                let rows = state.portfolio.lock().clone();
+                let sig: String = rows
+                    .iter()
+                    .map(|r| format!("{}:{:.0}:{:.2}:{:.2};", r.symbol, r.position, r.market_value, r.unrealized_pnl))
+                    .collect();
+                if sig != last_port_sig {
+                    last_port_sig = sig;
+                    let mut total_value = 0.0;
+                    let mut total_pnl = 0.0;
+                    let model: Vec<PortRow> = rows
+                        .iter()
+                        .map(|r| {
+                            total_value += r.market_value;
+                            total_pnl += r.unrealized_pnl;
+                            PortRow {
+                                symbol: r.symbol.as_str().into(),
+                                qty: format!("{:.0}", r.position).into(),
+                                avg: money(r.avg_cost).into(),
+                                last: money(r.market_price).into(),
+                                value: money(r.market_value).into(),
+                                pnl: money(r.unrealized_pnl).into(),
+                                up: r.unrealized_pnl >= 0.0,
+                            }
+                        })
+                        .collect();
+                    ui.set_portfolio(std::rc::Rc::new(slint::VecModel::from(model)).into());
+                    ui.set_port_total(money(total_value).into());
+                    ui.set_port_pnl(money(total_pnl).into());
+                    ui.set_port_pnl_up(total_pnl >= 0.0);
+                }
+            }
+
+            // ── Chart (copy precomputed path/labels when they change) ─────────
+            {
+                let c = state.chart.lock().clone();
+                let sig = format!("{}|{}|{}", c.symbol, c.status, c.path.len());
+                if sig != last_chart_sig {
+                    last_chart_sig = sig;
+                    ui.set_chart_status(c.status.into());
+                    ui.set_chart_path(c.path.into());
+                    ui.set_chart_min(c.min_label.into());
+                    ui.set_chart_max(c.max_label.into());
+                    ui.set_chart_last(c.last_label.into());
+                    ui.set_chart_up(c.up);
+                }
+            }
+
             // Refresh the account picker when the detected list changes.
             let detected = state.detected_accounts.lock().clone();
             if detected != last_accounts {

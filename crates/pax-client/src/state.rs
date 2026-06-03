@@ -1,6 +1,6 @@
 //! Shared, thread-safe client state: GUI-set controls, engine-set status, and a log.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -139,6 +139,31 @@ pub struct UpdateStatus {
     pub url: String,
 }
 
+/// A single live portfolio position (from the dedicated read-only data connection).
+#[derive(Default, Clone)]
+pub struct PortfolioRow {
+    pub symbol: String,
+    pub position: f64,
+    pub market_price: f64,
+    pub market_value: f64,
+    pub avg_cost: f64,
+    pub unrealized_pnl: f64,
+}
+
+/// Precomputed chart view (the data thread builds the path + labels off the UI thread).
+#[derive(Default, Clone)]
+pub struct ChartView {
+    pub symbol: String,
+    pub status: String,
+    /// SVG-style path command string in a 0..100 viewbox (y already inverted).
+    pub path: String,
+    pub min_label: String,
+    pub max_label: String,
+    pub last_label: String,
+    /// True when the period closed up (line shown green vs red).
+    pub up: bool,
+}
+
 pub struct SharedState {
     pub running: AtomicBool,
     pub close_all: AtomicBool,
@@ -148,6 +173,19 @@ pub struct SharedState {
     pub update: Mutex<UpdateStatus>,
     /// Accounts detected on the local IB login (for the GUI picker).
     pub detected_accounts: Mutex<Vec<String>>,
+    // ── Portfolio / charts (served by the read-only data connection) ──────────
+    /// True while the dedicated data connection is live.
+    pub data_connected: AtomicBool,
+    /// Live portfolio rows (market value / P&L per position).
+    pub portfolio: Mutex<Vec<PortfolioRow>>,
+    /// Symbol the chart should show.
+    pub chart_symbol: Mutex<String>,
+    /// Chart timeframe: 0=1D, 1=1W, 2=1M, 3=6M, 4=1Y.
+    pub chart_tf: AtomicU8,
+    /// Set by the GUI to request a (re)load of the chart.
+    pub chart_request: AtomicBool,
+    /// Precomputed chart (path + labels), produced by the data thread.
+    pub chart: Mutex<ChartView>,
 }
 
 impl SharedState {
@@ -160,6 +198,12 @@ impl SharedState {
             log: Mutex::new(LogBuffer::default()),
             update: Mutex::new(UpdateStatus::default()),
             detected_accounts: Mutex::new(Vec::new()),
+            data_connected: AtomicBool::new(false),
+            portfolio: Mutex::new(Vec::new()),
+            chart_symbol: Mutex::new(String::new()),
+            chart_tf: AtomicU8::new(3), // 6M default
+            chart_request: AtomicBool::new(false),
+            chart: Mutex::new(ChartView::default()),
         })
     }
 

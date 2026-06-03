@@ -1,4 +1,14 @@
-import { ScrollView } from "std-widgets.slint";
+import { ScrollView, ListView } from "std-widgets.slint";
+
+struct PortRow {
+    symbol: string,
+    qty: string,
+    avg: string,
+    last: string,
+    value: string,
+    pnl: string,
+    up: bool,
+}
 
 component LineField inherits Rectangle {
     in-out property <string> value;
@@ -57,10 +67,10 @@ component PaxButton inherits Rectangle {
 export component ClientWindow inherits Window {
     title: "Pax Americana - Client";
     default-font-size: 14px;
-    preferred-width: 720px;
-    preferred-height: 780px;
-    min-width: 600px;
-    min-height: 600px;
+    preferred-width: 760px;
+    preferred-height: 820px;
+    min-width: 620px;
+    min-height: 620px;
     background: #0a0e16;
 
     in property <bool> connected;
@@ -73,7 +83,8 @@ export component ClientWindow inherits Window {
     in property <bool> margin_blocked;
     in property <string> log_text;
 
-    in-out property <int> account_mode;   // 0 live, 1 paper
+    in-out property <int> active_tab;      // 0 sync, 1 portfolio, 2 charts
+    in-out property <int> account_mode;    // 0 live, 1 paper
     in-out property <int> trade_mode;      // 0 long&short, 1 long only
     in-out property <int> exec_mode;       // 0 existing+new, 1 new only
     in-out property <int> hours_mode;      // 0 = 24h, 1 = regular trading hours only
@@ -90,6 +101,23 @@ export component ClientWindow inherits Window {
     in property <string> update_text;
     in property <bool> update_available;
 
+    // Portfolio
+    in property <[PortRow]> portfolio;
+    in property <string> port_total;
+    in property <string> port_pnl;
+    in property <bool> port_pnl_up;
+    in property <bool> data_connected;
+
+    // Charts
+    in-out property <string> chart_symbol;
+    in-out property <int> chart_tf;        // 0 1D, 1 1W, 2 1M, 3 6M, 4 1Y
+    in property <string> chart_status;
+    in property <string> chart_path;
+    in property <string> chart_min;
+    in property <string> chart_max;
+    in property <string> chart_last;
+    in property <bool> chart_up;
+
     callback start();
     callback stop();
     callback close_all();
@@ -98,11 +126,14 @@ export component ClientWindow inherits Window {
     callback check_update();
     callback download_update();
     callback detect_accounts();
+    callback load_chart();
+    callback view_symbol(string);
 
     VerticalLayout {
         padding: 16px;
         spacing: 8px;
 
+        // ── Header (always visible) ──────────────────────────────────────────
         HorizontalLayout {
             spacing: 8px;
             Text { text: "⬢ PAX AMERICANA"; color: #ff7849; font-size: 20px; font-weight: 800; }
@@ -121,164 +152,310 @@ export component ClientWindow inherits Window {
             Text { text: root.balance_text; color: #34d399; font-weight: 700; }
             Text { text: root.server_text; color: #53b9f2; }
         }
-        Text { text: root.counts_text; color: #909fb7; }
-        Text {
-            text: root.margin_text;
-            color: root.margin_blocked ? #f5b454 : #5a6880;
-            font-size: 12px;
-        }
 
-        Text { text: "ENGINE"; color: #909fb7; font-size: 11px; font-weight: 700; }
-        HorizontalLayout {
-            spacing: 10px;
-            PaxButton { label: root.running ? "▶ RUNNING" : "▶ START"; fill: #34d399; width: 120px; clicked => { root.start(); } }
-            PaxButton { label: "■ STOP"; fill: #fb5d6e; width: 100px; clicked => { root.stop(); } }
-            PaxButton { label: "CLOSE ALL"; fill: #f5b454; width: 120px; clicked => { root.close_all(); } }
-            PaxButton { label: "KILL OTHERS"; fill: #c97a3f; width: 130px; clicked => { root.kill(); } }
-            Rectangle { }
-        }
-
-        Text { text: "SETTINGS"; color: #909fb7; font-size: 11px; font-weight: 700; }
-        HorizontalLayout {
-            spacing: 8px;
-            Text { text: "Account"; color: #909fb7; width: 70px; vertical-alignment: center; }
-            Segment { label: "Live"; active: root.account_mode == 0; width: 70px; clicked => { root.account_mode = 0; } }
-            Segment { label: "Paper"; active: root.account_mode == 1; width: 70px; clicked => { root.account_mode = 1; } }
-            Rectangle { width: 12px; }
-            Text { text: "Trading"; color: #909fb7; width: 60px; vertical-alignment: center; }
-            Segment { label: "Long & Short"; active: root.trade_mode == 0; width: 110px; clicked => { root.trade_mode = 0; } }
-            Segment { label: "Long Only"; active: root.trade_mode == 1; width: 100px; clicked => { root.trade_mode = 1; } }
-            Rectangle { }
-        }
-        HorizontalLayout {
-            spacing: 8px;
-            Text { text: "Execution"; color: #909fb7; width: 70px; vertical-alignment: center; }
-            Segment { label: "Existing + New"; active: root.exec_mode == 0; width: 130px; clicked => { root.exec_mode = 0; } }
-            Segment { label: "New Only"; active: root.exec_mode == 1; width: 100px; clicked => { root.exec_mode = 1; } }
-            Rectangle { width: 12px; }
-            Text { text: "Hours"; color: #909fb7; width: 46px; vertical-alignment: center; }
-            Segment { label: "24h"; active: root.hours_mode == 0; width: 60px; clicked => { root.hours_mode = 0; } }
-            Segment { label: "RTH only"; active: root.hours_mode == 1; width: 90px; clicked => { root.hours_mode = 1; } }
-            Rectangle { }
-        }
-        HorizontalLayout {
-            spacing: 8px;
-            Text { text: "Multiplier x"; color: #909fb7; width: 90px; vertical-alignment: center; }
-            LineField { value <=> root.multiplier; width: 80px; }
-            Text { text: "Max Drawdown %"; color: #909fb7; width: 120px; vertical-alignment: center; }
-            LineField { value <=> root.drawdown; width: 80px; }
-            Rectangle { }
-        }
-        HorizontalLayout {
-            spacing: 8px;
-            Text { text: "Max Pos $"; color: #909fb7; width: 90px; vertical-alignment: center; }
-            LineField { value <=> root.max_notional; width: 110px; }
-            Text { text: "Max Pos Qty"; color: #909fb7; width: 110px; vertical-alignment: center; }
-            LineField { value <=> root.max_qty; width: 110px; }
-            Rectangle { }
-        }
-        HorizontalLayout {
-            spacing: 8px;
-            Text { text: "IB Host"; color: #909fb7; width: 90px; vertical-alignment: center; }
-            LineField { value <=> root.host; width: 160px; }
-            Text { text: "Live"; color: #909fb7; width: 32px; vertical-alignment: center; }
-            LineField { value <=> root.live_port; width: 80px; }
-            Text { text: "Paper"; color: #909fb7; width: 44px; vertical-alignment: center; }
-            LineField { value <=> root.paper_port; width: 80px; }
-            Rectangle { }
-        }
+        // ── Tab bar ──────────────────────────────────────────────────────────
         HorizontalLayout {
             spacing: 6px;
-            Text { text: "Account"; color: #909fb7; width: 90px; vertical-alignment: center; }
-            for a in root.accounts : Rectangle {
-                min-width: 100px;
-                height: 28px;
-                background: a == root.account ? #34445e : #0d1420;
-                border-radius: 6px;
-                border-width: 1px;
-                border-color: a == root.account ? #ff7849 : #222d40;
-                TouchArea { clicked => { root.account = a; } }
-                HorizontalLayout {
-                    padding-left: 12px;
-                    padding-right: 12px;
-                    Text { text: a; color: a == root.account ? white : #909fb7; vertical-alignment: center; font-weight: 700; }
+            Segment { label: "Sync"; active: root.active_tab == 0; width: 110px; clicked => { root.active_tab = 0; } }
+            Segment { label: "Portfolio"; active: root.active_tab == 1; width: 110px; clicked => { root.active_tab = 1; } }
+            Segment { label: "Charts"; active: root.active_tab == 2; width: 110px; clicked => { root.active_tab = 2; } }
+            Rectangle { }
+        }
+
+        // ════════════════════════ SYNC TAB ════════════════════════
+        if root.active_tab == 0 : VerticalLayout {
+            vertical-stretch: 1;
+            spacing: 8px;
+
+            Text { text: root.counts_text; color: #909fb7; }
+            Text {
+                text: root.margin_text;
+                color: root.margin_blocked ? #f5b454 : #5a6880;
+                font-size: 12px;
+            }
+
+            Text { text: "ENGINE"; color: #909fb7; font-size: 11px; font-weight: 700; }
+            HorizontalLayout {
+                spacing: 10px;
+                PaxButton { label: root.running ? "▶ RUNNING" : "▶ START"; fill: #34d399; width: 120px; clicked => { root.start(); } }
+                PaxButton { label: "■ STOP"; fill: #fb5d6e; width: 100px; clicked => { root.stop(); } }
+                PaxButton { label: "CLOSE ALL"; fill: #f5b454; width: 120px; clicked => { root.close_all(); } }
+                PaxButton { label: "KILL OTHERS"; fill: #c97a3f; width: 130px; clicked => { root.kill(); } }
+                Rectangle { }
+            }
+
+            Text { text: "SETTINGS"; color: #909fb7; font-size: 11px; font-weight: 700; }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Account"; color: #909fb7; width: 70px; vertical-alignment: center; }
+                Segment { label: "Live"; active: root.account_mode == 0; width: 70px; clicked => { root.account_mode = 0; } }
+                Segment { label: "Paper"; active: root.account_mode == 1; width: 70px; clicked => { root.account_mode = 1; } }
+                Rectangle { width: 12px; }
+                Text { text: "Trading"; color: #909fb7; width: 60px; vertical-alignment: center; }
+                Segment { label: "Long & Short"; active: root.trade_mode == 0; width: 110px; clicked => { root.trade_mode = 0; } }
+                Segment { label: "Long Only"; active: root.trade_mode == 1; width: 100px; clicked => { root.trade_mode = 1; } }
+                Rectangle { }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Execution"; color: #909fb7; width: 70px; vertical-alignment: center; }
+                Segment { label: "Existing + New"; active: root.exec_mode == 0; width: 130px; clicked => { root.exec_mode = 0; } }
+                Segment { label: "New Only"; active: root.exec_mode == 1; width: 100px; clicked => { root.exec_mode = 1; } }
+                Rectangle { width: 12px; }
+                Text { text: "Hours"; color: #909fb7; width: 46px; vertical-alignment: center; }
+                Segment { label: "24h"; active: root.hours_mode == 0; width: 60px; clicked => { root.hours_mode = 0; } }
+                Segment { label: "RTH only"; active: root.hours_mode == 1; width: 90px; clicked => { root.hours_mode = 1; } }
+                Rectangle { }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Multiplier x"; color: #909fb7; width: 90px; vertical-alignment: center; }
+                LineField { value <=> root.multiplier; width: 80px; }
+                Text { text: "Max Drawdown %"; color: #909fb7; width: 120px; vertical-alignment: center; }
+                LineField { value <=> root.drawdown; width: 80px; }
+                Rectangle { }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Max Pos $"; color: #909fb7; width: 90px; vertical-alignment: center; }
+                LineField { value <=> root.max_notional; width: 110px; }
+                Text { text: "Max Pos Qty"; color: #909fb7; width: 110px; vertical-alignment: center; }
+                LineField { value <=> root.max_qty; width: 110px; }
+                Rectangle { }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "IB Host"; color: #909fb7; width: 90px; vertical-alignment: center; }
+                LineField { value <=> root.host; width: 160px; }
+                Text { text: "Live"; color: #909fb7; width: 32px; vertical-alignment: center; }
+                LineField { value <=> root.live_port; width: 80px; }
+                Text { text: "Paper"; color: #909fb7; width: 44px; vertical-alignment: center; }
+                LineField { value <=> root.paper_port; width: 80px; }
+                Rectangle { }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                Text { text: "Account"; color: #909fb7; width: 90px; vertical-alignment: center; }
+                for a in root.accounts : Rectangle {
+                    min-width: 100px;
+                    height: 28px;
+                    background: a == root.account ? #34445e : #0d1420;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: a == root.account ? #ff7849 : #222d40;
+                    TouchArea { clicked => { root.account = a; } }
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        Text { text: a; color: a == root.account ? white : #909fb7; vertical-alignment: center; font-weight: 700; }
+                    }
+                }
+                Rectangle {
+                    width: 130px;
+                    height: 28px;
+                    border-radius: 6px;
+                    background: dt.has-hover ? #202c3e : #172130;
+                    border-width: 1px;
+                    border-color: #222d40;
+                    dt := TouchArea { clicked => { root.detect_accounts(); } }
+                    Text { text: "Detect Accounts"; color: #909fb7; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                Rectangle { }
+            }
+            if root.accounts.length == 0 : Text {
+                text: "No accounts detected — set host/port/mode, then Detect Accounts.";
+                color: #5a6880;
+                font-size: 11px;
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                PaxButton { label: "SAVE SETTINGS"; width: 160px; clicked => { root.save(); } }
+                Text { text: "Modes/risk apply live; host & ports apply on START."; color: #5a6880; font-size: 11px; vertical-alignment: center; }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: root.update_text;
+                    color: root.update_available ? #f5b454 : #5a6880;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                Rectangle { }
+                if root.update_available : Rectangle {
+                    width: 110px;
+                    height: 26px;
+                    border-radius: 7px;
+                    background: dl.has-hover ? #3ee0a6 : #34d399;
+                    dl := TouchArea { clicked => { root.download_update(); } }
+                    Text { text: "UPDATE NOW"; color: #06080d; font-weight: 700; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                Rectangle {
+                    width: 140px;
+                    height: 26px;
+                    border-radius: 7px;
+                    background: ck.has-hover ? #202c3e : #172130;
+                    border-width: 1px;
+                    border-color: #222d40;
+                    ck := TouchArea { clicked => { root.check_update(); } }
+                    Text { text: "Check for Updates"; color: #909fb7; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
                 }
             }
+
+            Text { text: "LIVE ORDER FEED"; color: #909fb7; font-size: 11px; font-weight: 700; }
             Rectangle {
-                width: 130px;
-                height: 28px;
-                border-radius: 6px;
-                background: dt.has-hover ? #202c3e : #172130;
+                vertical-stretch: 1;
+                background: #0d1420;
+                border-radius: 8px;
                 border-width: 1px;
                 border-color: #222d40;
-                dt := TouchArea { clicked => { root.detect_accounts(); } }
-                Text { text: "Detect Accounts"; color: #909fb7; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
-            }
-            Rectangle { }
-        }
-        if root.accounts.length == 0 : Text {
-            text: "No accounts detected — set host/port/mode, then Detect Accounts.";
-            color: #5a6880;
-            font-size: 11px;
-        }
-        if root.accounts.length > 1 && root.account == "" : Text {
-            text: "Multiple accounts found — pick one before START.";
-            color: #f5b454;
-            font-size: 11px;
-        }
-        HorizontalLayout {
-            spacing: 10px;
-            PaxButton { label: "SAVE SETTINGS"; width: 160px; clicked => { root.save(); } }
-            Text { text: "Modes/risk apply live; host & ports apply on START."; color: #5a6880; font-size: 11px; vertical-alignment: center; }
-        }
-
-        // Update notification (non-invasive): line + buttons, never blocks anything.
-        HorizontalLayout {
-            spacing: 8px;
-            Text {
-                text: root.update_text;
-                color: root.update_available ? #f5b454 : #5a6880;
-                font-size: 12px;
-                vertical-alignment: center;
-            }
-            Rectangle { }
-            if root.update_available : Rectangle {
-                width: 110px;
-                height: 26px;
-                border-radius: 7px;
-                background: dl.has-hover ? #3ee0a6 : #34d399;
-                dl := TouchArea { clicked => { root.download_update(); } }
-                Text { text: "UPDATE NOW"; color: #06080d; font-weight: 700; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
-            }
-            Rectangle {
-                width: 140px;
-                height: 26px;
-                border-radius: 7px;
-                background: ck.has-hover ? #202c3e : #172130;
-                border-width: 1px;
-                border-color: #222d40;
-                ck := TouchArea { clicked => { root.check_update(); } }
-                Text { text: "Check for Updates"; color: #909fb7; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
-            }
-        }
-
-        Text { text: "LIVE ORDER FEED"; color: #909fb7; font-size: 11px; font-weight: 700; }
-        Rectangle {
-            vertical-stretch: 1;
-            background: #0d1420;
-            border-radius: 8px;
-            border-width: 1px;
-            border-color: #222d40;
-            ScrollView {
-                VerticalLayout {
-                    padding: 8px;
-                    Text {
-                        text: root.log_text;
-                        color: #cfe3ff;
-                        font-family: "Consolas";
-                        font-size: 12px;
-                        wrap: word-wrap;
+                ScrollView {
+                    VerticalLayout {
+                        padding: 8px;
+                        Text {
+                            text: root.log_text;
+                            color: #cfe3ff;
+                            font-family: "Consolas";
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
                     }
+                }
+            }
+        }
+
+        // ════════════════════════ PORTFOLIO TAB ════════════════════════
+        if root.active_tab == 1 : VerticalLayout {
+            vertical-stretch: 1;
+            spacing: 8px;
+
+            HorizontalLayout {
+                spacing: 24px;
+                Text { text: "Market Value: " + root.port_total; color: #e9f0fb; font-weight: 700; }
+                Text { text: "Unrealized P&L: " + root.port_pnl; color: root.port_pnl_up ? #34d399 : #fb5d6e; font-weight: 700; }
+                Rectangle { }
+                Text {
+                    text: root.data_connected ? "● data live" : "○ data offline";
+                    color: root.data_connected ? #34d399 : #5a6880;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Column header
+            Rectangle {
+                height: 26px;
+                background: #11192a;
+                border-radius: 6px;
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 8px;
+                    Text { text: "Symbol"; color: #909fb7; font-size: 11px; font-weight: 700; width: 90px; vertical-alignment: center; }
+                    Text { text: "Qty"; color: #909fb7; font-size: 11px; font-weight: 700; width: 80px; horizontal-alignment: right; vertical-alignment: center; }
+                    Text { text: "Avg"; color: #909fb7; font-size: 11px; font-weight: 700; width: 90px; horizontal-alignment: right; vertical-alignment: center; }
+                    Text { text: "Last"; color: #909fb7; font-size: 11px; font-weight: 700; width: 90px; horizontal-alignment: right; vertical-alignment: center; }
+                    Text { text: "Mkt Value"; color: #909fb7; font-size: 11px; font-weight: 700; width: 130px; horizontal-alignment: right; vertical-alignment: center; }
+                    Text { text: "Unrl P&L"; color: #909fb7; font-size: 11px; font-weight: 700; horizontal-alignment: right; vertical-alignment: center; }
+                }
+            }
+
+            Rectangle {
+                vertical-stretch: 1;
+                background: #0d1420;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: #222d40;
+                if root.portfolio.length == 0 : Text {
+                    x: 12px; y: 12px;
+                    text: root.data_connected
+                        ? "No open positions in this account."
+                        : "Connecting to IB for portfolio data…";
+                    color: #5a6880;
+                    font-size: 12px;
+                }
+                ListView {
+                    for r in root.portfolio : Rectangle {
+                        height: 30px;
+                        background: rta.has-hover ? #1b2942 : transparent;
+                        rta := TouchArea { clicked => { root.view_symbol(r.symbol); } }
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 8px;
+                            Text { text: r.symbol; color: #cfe3ff; font-weight: 700; width: 90px; vertical-alignment: center; }
+                            Text { text: r.qty; color: #aab8d0; width: 80px; horizontal-alignment: right; vertical-alignment: center; }
+                            Text { text: r.avg; color: #aab8d0; width: 90px; horizontal-alignment: right; vertical-alignment: center; }
+                            Text { text: r.last; color: #aab8d0; width: 90px; horizontal-alignment: right; vertical-alignment: center; }
+                            Text { text: r.value; color: #e9f0fb; width: 130px; horizontal-alignment: right; vertical-alignment: center; }
+                            Text { text: r.pnl; color: r.up ? #34d399 : #fb5d6e; horizontal-alignment: right; vertical-alignment: center; }
+                        }
+                    }
+                }
+            }
+            Text { text: "Tip: click a position to chart it."; color: #5a6880; font-size: 11px; }
+        }
+
+        // ════════════════════════ CHARTS TAB ════════════════════════
+        if root.active_tab == 2 : VerticalLayout {
+            vertical-stretch: 1;
+            spacing: 8px;
+
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Symbol"; color: #909fb7; width: 60px; vertical-alignment: center; }
+                LineField { value <=> root.chart_symbol; width: 120px; }
+                PaxButton { label: "LOAD"; width: 80px; clicked => { root.load_chart(); } }
+                Rectangle { width: 12px; }
+                Segment { label: "1D"; active: root.chart_tf == 0; width: 48px; clicked => { root.chart_tf = 0; root.load_chart(); } }
+                Segment { label: "1W"; active: root.chart_tf == 1; width: 48px; clicked => { root.chart_tf = 1; root.load_chart(); } }
+                Segment { label: "1M"; active: root.chart_tf == 2; width: 48px; clicked => { root.chart_tf = 2; root.load_chart(); } }
+                Segment { label: "6M"; active: root.chart_tf == 3; width: 48px; clicked => { root.chart_tf = 3; root.load_chart(); } }
+                Segment { label: "1Y"; active: root.chart_tf == 4; width: 48px; clicked => { root.chart_tf = 4; root.load_chart(); } }
+                Rectangle { }
+            }
+            Text { text: root.chart_status; color: #909fb7; font-size: 12px; }
+
+            Rectangle {
+                vertical-stretch: 1;
+                background: #0d1420;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: #222d40;
+                clip: true;
+
+                // Price axis labels
+                Text { x: 10px; y: 8px; text: root.chart_max; color: #5a6880; font-size: 11px; }
+                Text { x: 10px; y: parent.height - 22px; text: root.chart_min; color: #5a6880; font-size: 11px; }
+                Text {
+                    x: parent.width - self.width - 12px;
+                    y: 8px;
+                    text: root.chart_last;
+                    color: root.chart_up ? #34d399 : #fb5d6e;
+                    font-size: 13px;
+                    font-weight: 700;
+                }
+
+                // The line itself (padded inside the box).
+                Rectangle {
+                    x: 8px; y: 26px;
+                    width: parent.width - 16px;
+                    height: parent.height - 40px;
+                    Path {
+                        width: 100%;
+                        height: 100%;
+                        viewbox-x: 0; viewbox-y: 0;
+                        viewbox-width: 100; viewbox-height: 100;
+                        commands: root.chart_path;
+                        stroke: root.chart_up ? #34d399 : #fb5d6e;
+                        stroke-width: 1.4px;
+                    }
+                }
+                if root.chart_path == "" : Text {
+                    x: 12px; y: 30px;
+                    text: "Enter a symbol and press LOAD (US stocks, SMART routing).";
+                    color: #5a6880;
+                    font-size: 12px;
                 }
             }
         }
