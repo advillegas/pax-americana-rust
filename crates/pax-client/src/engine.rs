@@ -27,13 +27,12 @@ pub fn spawn(cfg: ClientConfig, state: Arc<SharedState>) {
 }
 
 fn engine_main(cfg: ClientConfig, state: Arc<SharedState>) {
-    let api = MasterApi::new(&cfg.master_url, &cfg.master_api_key);
     loop {
         // Idle until the operator starts the engine.
         while !state.is_running() {
             thread::sleep(Duration::from_millis(200));
         }
-        run_session(&cfg, &state, &api);
+        run_session(&cfg, &state);
         // Session ended; reflect disconnection and loop back to idle/reconnect.
         state.with_status(|s| {
             s.connected = false;
@@ -41,11 +40,14 @@ fn engine_main(cfg: ClientConfig, state: Arc<SharedState>) {
     }
 }
 
-fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>, api: &MasterApi) {
-    let (account_mode, host, port_live, port_paper) = {
+fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
+    let (account_mode, host, port_live, port_paper, master_url) = {
         let c = state.controls.lock();
-        (c.account_mode, c.ib_host.clone(), c.ib_port_live, c.ib_port_paper)
+        (c.account_mode, c.ib_host.clone(), c.ib_port_live, c.ib_port_paper, c.master_url.clone())
     };
+    // Master URL is read at session start from the GUI-editable controls.
+    let api = MasterApi::new(&master_url, &cfg.master_api_key);
+    state.log(LogLevel::Info, format!("Master: {master_url}"));
     let port = match account_mode {
         AccountMode::Live => port_live,
         AccountMode::Paper => port_paper,

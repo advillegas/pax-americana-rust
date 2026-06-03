@@ -81,6 +81,7 @@ export component ClientWindow inherits Window {
     in-out property <string> host;
     in-out property <string> live_port;
     in-out property <string> paper_port;
+    in-out property <string> master_url;
 
     callback start();
     callback stop();
@@ -156,6 +157,11 @@ export component ClientWindow inherits Window {
             Text { text: "Max Pos Qty"; color: #909fb7; width: 120px; vertical-alignment: center; }
             LineField { value <=> root.max_qty; width: 100px; }
             Rectangle { }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "Master URL"; color: #909fb7; width: 90px; vertical-alignment: center; }
+            LineField { value <=> root.master_url; }
         }
         HorizontalLayout {
             spacing: 8px;
