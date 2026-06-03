@@ -1,14 +1,17 @@
-//! Blocking HTTP API served to clients. No async runtime — one tiny_http server thread
-//! plus a small worker pool, which keeps the master simple and crash-resistant.
+//! Blocking HTTP API + embedded web control panel. No async runtime — one tiny_http
+//! server plus a small worker pool, which keeps the master simple and crash-resistant.
+//! The web panel (served at `/`) is the VPS-friendly GUI: it needs no graphics stack.
 
 use std::sync::Arc;
 use std::thread;
 
 use pax_core::protocol::StatusDoc;
 use pax_core::PROTOCOL_SCHEMA;
+use serde::Deserialize;
 use tiny_http::{Header, Method, Response, Server};
 
-use crate::state::{LogLevel, SharedState};
+use crate::dashboard;
+use crate::state::{IbMode, LogLevel, SharedState};
 
 pub fn spawn(bind: String, api_key: String, state: Arc<SharedState>) {
     thread::spawn(move || {
@@ -19,10 +22,9 @@ pub fn spawn(bind: String, api_key: String, state: Arc<SharedState>) {
                 return;
             }
         };
-        state.log(LogLevel::Ok, format!("HTTP API listening on {bind}"));
+        state.log(LogLevel::Ok, format!("HTTP API + web panel on http://{bind}/"));
         let server = Arc::new(server);
 
-        // A small fixed pool of handler threads.
         for _ in 0..4 {
             let server = server.clone();
             let state = state.clone();
@@ -33,19 +35,33 @@ pub fn spawn(bind: String, api_key: String, state: Arc<SharedState>) {
                 }
             });
         }
-
-        // Park the spawner thread forever; the pool does the work.
         loop {
             thread::park();
         }
     });
 }
 
-fn handle(request: tiny_http::Request, state: &SharedState, api_key: &str) {
-    let url = request.url().to_string();
-    let path = url.split('?').next().unwrap_or("/");
+#[derive(Deserialize)]
+struct ConfigUpdate {
+    host: Option<String>,
+    port_live: Option<u16>,
+    port_paper: Option<u16>,
+    mode: Option<String>,
+}
 
-    // Auth: when configured, require a matching X-API-Key header.
+fn handle(mut request: tiny_http::Request, state: &SharedState, api_key: &str) {
+    let url = request.url().to_string();
+    let path = url.split('?').next().unwrap_or("/").to_string();
+    let method = request.method().clone();
+
+    // The dashboard shell loads without auth; its JS sends the key for data/config.
+    if path == "/" && method == Method::Get {
+        let header = Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap();
+        let _ = request.respond(Response::from_string(dashboard::HTML).with_header(header));
+        return;
+    }
+
+    // Auth gate for everything else.
     if !api_key.is_empty() {
         let provided = request
             .headers()
@@ -59,21 +75,71 @@ fn handle(request: tiny_http::Request, state: &SharedState, api_key: &str) {
         }
     }
 
-    if request.method() != &Method::Get {
+    // Config update (the only mutating endpoint).
+    if path == "/config" && method == Method::Post {
+        let mut body = String::new();
+        if request.as_reader().read_to_string(&mut body).is_err() {
+            let _ = request.respond(json_response(400, r#"{"error":"bad_body"}"#));
+            return;
+        }
+        match serde_json::from_str::<ConfigUpdate>(&body) {
+            Ok(upd) => {
+                {
+                    let mut conn = state.conn.lock();
+                    if let Some(h) = upd.host {
+                        if !h.trim().is_empty() {
+                            conn.host = h.trim().to_string();
+                        }
+                    }
+                    if let Some(p) = upd.port_live {
+                        conn.port_live = p;
+                    }
+                    if let Some(p) = upd.port_paper {
+                        conn.port_paper = p;
+                    }
+                    if let Some(m) = upd.mode {
+                        conn.mode = if m.eq_ignore_ascii_case("live") {
+                            IbMode::Live
+                        } else {
+                            IbMode::Paper
+                        };
+                    }
+                }
+                state.request_reconnect();
+                state.log(LogLevel::Warn, format!("Config updated via web → reconnecting to {}", state.endpoint()));
+                let _ = request.respond(json_response(200, r#"{"ok":true}"#));
+            }
+            Err(e) => {
+                let _ = request.respond(json_response(400, &format!(r#"{{"error":"bad_json: {e}"}}"#)));
+            }
+        }
+        return;
+    }
+
+    if method != Method::Get {
         let _ = request.respond(json_response(405, r#"{"error":"method_not_allowed"}"#));
         return;
     }
 
-    let body = match path {
-        "/snapshot" | "/positions" => {
-            let snap = state.snapshot.lock();
-            snap.to_json()
-        }
+    let body = match path.as_str() {
+        "/snapshot" | "/positions" => state.snapshot.lock().to_json(),
         "/balance" => {
             let snap = state.snapshot.lock();
             format!(r#"{{"balance":{},"connected":{}}}"#, snap.balance, snap.connected)
         }
-        "/status" | "/" => {
+        "/config" => {
+            let conn = state.conn.lock();
+            let mode = match conn.mode {
+                IbMode::Live => "live",
+                IbMode::Paper => "paper",
+            };
+            format!(
+                r#"{{"host":"{}","port_live":{},"port_paper":{},"mode":"{}"}}"#,
+                conn.host, conn.port_live, conn.port_paper, mode
+            )
+        }
+        "/log" => log_json(state),
+        "/status" => {
             let snap = state.snapshot.lock();
             let doc = StatusDoc {
                 status: "running",
@@ -91,6 +157,29 @@ fn handle(request: tiny_http::Request, state: &SharedState, api_key: &str) {
     };
 
     let _ = request.respond(json_response(200, &body));
+}
+
+fn log_json(state: &SharedState) -> String {
+    let log = state.log.lock();
+    let items: Vec<String> = log
+        .lines()
+        .iter()
+        .map(|l| {
+            let lvl = match l.level {
+                LogLevel::Ok => "OK",
+                LogLevel::Warn => "WARN",
+                LogLevel::Err => "ERR",
+                LogLevel::Info => "INFO",
+            };
+            format!(
+                r#"{{"ts":{},"level":"{}","msg":{}}}"#,
+                serde_json::to_string(&l.ts).unwrap_or_else(|_| "\"\"".into()),
+                lvl,
+                serde_json::to_string(&l.msg).unwrap_or_else(|_| "\"\"".into()),
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(","))
 }
 
 fn json_response(status: u16, body: &str) -> Response<std::io::Cursor<Vec<u8>>> {

@@ -9,6 +9,7 @@
 //! `PAX_HEADLESS=1` / `--headless`, it runs without the GUI and keeps serving.
 
 mod config;
+mod dashboard;
 mod ib;
 mod server;
 mod state;

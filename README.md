@@ -148,12 +148,16 @@ netsh advfirewall firewall add rule name="PaxAmericana" dir=in action=allow prot
 ```bash
 pax-master
 ```
-The master runs as a console daemon and opens an optional monitoring GUI. On a headless
-or RDP server with no OpenGL, the GUI can't render — the master detects this, prints a
-notice, and **keeps running headless** (IB worker + HTTP API stay up). To skip the GUI
-explicitly (recommended for servers), run headless:
+The master runs as a console daemon. It also serves a **web control panel** at
+`http://<host>:5001/` — open it in any browser (on the VPS or remotely) to monitor status
+and edit the host/port/mode live. The web panel needs no graphics stack, so it's the
+recommended UI on VPS/headless/RDP machines where the native OpenGL GUI can't render.
+
+The master also opens an optional native monitoring GUI when a display + OpenGL are
+available; if not, it detects this, prints a notice, and **keeps running headless** (IB
+worker + HTTP API + web panel stay up). To skip the native GUI explicitly:
 ```bash
-pax-master --headless        # or set PAX_HEADLESS=1
+pax-master --headless        # or set PAX_HEADLESS=1 — the web panel still works
 ```
 Serves: `GET /snapshot` (full structure), `GET /status`, `GET /balance`. When
 `PAX_API_KEY` is set, all endpoints require the `X-API-Key` header.
