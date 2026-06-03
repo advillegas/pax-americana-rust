@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ibapi::client::blocking::Client;
+use ibapi::orders::OrderUpdate;
 use pax_core::{
     desired_working_orders, diff_working_orders, effective_positions, reconcile, IntentReason,
     ReconcileInput, Side, SizingParams,
@@ -19,6 +20,7 @@ use pax_core::{
 
 use crate::config::{stable_client_id, ClientConfig};
 use crate::ib;
+use crate::license::{self, LicenseStatus};
 use crate::master_api::MasterApi;
 use crate::state::{AccountMode, ExecutionMode, LogLevel, SharedState, TradeMode};
 
@@ -111,6 +113,28 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         s.drawdown_hit = false;
     });
 
+    // ── license gate ─────────────────────────────────────────────────────────
+    match license::check(&account) {
+        LicenseStatus::Authorized => state.log(LogLevel::Ok, "License verified ✓"),
+        LicenseStatus::Denied => {
+            state.log(
+                LogLevel::Err,
+                format!("Account {account} is not licensed — contact support@neroai.com. Stopping."),
+            );
+            state.running.store(false, Ordering::Relaxed);
+            return;
+        }
+        LicenseStatus::Unknown => {
+            state.log(LogLevel::Err, "Could not verify license (endpoint unreachable). Stopping.");
+            state.running.store(false, Ordering::Relaxed);
+            return;
+        }
+    }
+    let mut last_license = Instant::now();
+
+    // Order lifecycle stream (fills, rejections, IBKR notices).
+    let order_stream = client.order_update_stream().ok();
+
     let mut cooldown: HashMap<String, Instant> = HashMap::new();
     let mut wo_cooldown: HashMap<String, Instant> = HashMap::new();
     let mut drawdown_hit = false;
@@ -122,6 +146,52 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
     let mut baseline_symbols: Option<HashSet<String>> = None;
 
     while state.is_running() {
+        // ── periodic license re-check (revocation stops trading) ──────────────
+        if last_license.elapsed() >= Duration::from_secs(60) {
+            last_license = Instant::now();
+            if license::check(&account) == LicenseStatus::Denied {
+                state.log(LogLevel::Err, "License revoked — stopping engine.");
+                state.stop_engine();
+                break;
+            }
+        }
+
+        // ── drain order-status updates (fills / rejections / IBKR notices) ────
+        if let Some(os) = &order_stream {
+            while let Some(upd) = os.try_next() {
+                match upd {
+                    OrderUpdate::ExecutionData(d) => {
+                        let lvl = if d.execution.side == "SLD" { LogLevel::Sell } else { LogLevel::Buy };
+                        state.log(
+                            lvl,
+                            format!(
+                                "FILL {} {} {:.0} @ {:.2}",
+                                d.execution.side,
+                                d.contract.symbol,
+                                d.execution.shares,
+                                d.execution.price
+                            ),
+                        );
+                    }
+                    OrderUpdate::OrderStatus(s) => {
+                        if s.status == "Inactive" {
+                            state.log(
+                                LogLevel::Err,
+                                format!("Order {} rejected/inactive (filled {:.0}, rem {:.0})", s.order_id, s.filled, s.remaining),
+                            );
+                            state.with_status(|st| st.orders_failed += 1);
+                        }
+                    }
+                    OrderUpdate::Message(n) => {
+                        if !is_notice_noise(n.code) {
+                            state.log(LogLevel::Warn, format!("IBKR [{}] {}", n.code, n.message));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         // ── one-shot Close All request ───────────────────────────────────────
         if state.close_all.swap(false, Ordering::Relaxed) {
             do_close_all(&client, state, &account);
@@ -425,6 +495,12 @@ fn do_close_all(client: &Client, state: &Arc<SharedState>, account: &str) {
         thread::sleep(Duration::from_millis(300));
     }
     state.log(LogLevel::Ok, "Close all submitted.");
+}
+
+/// IBKR system notices that are routine status/connectivity chatter (and cancel
+/// confirmations), suppressed from the order feed to avoid noise.
+fn is_notice_noise(code: i32) -> bool {
+    matches!(code, 202 | 2100 | 2103 | 2104 | 2105 | 2106 | 2107 | 2108 | 2119 | 2150 | 2158)
 }
 
 fn is_closing(reason: IntentReason) -> bool {

@@ -12,7 +12,9 @@
 mod config;
 mod engine;
 mod ib;
+mod license;
 mod master_api;
+mod persist;
 mod state;
 
 use std::os::windows::process::CommandExt;
@@ -40,6 +42,8 @@ fn main() {
         c.ib_port_paper = cfg.ib_port_paper;
         c.ib_account = cfg.ib_account.clone();
         c.master_url = cfg.master_url.clone();
+        // Saved settings (if any) override the env/config defaults.
+        persist::load_into(&mut c);
     }
     state.log(LogLevel::Info, format!("Pax Americana ready. Master: {}", cfg.master_url));
 
@@ -210,6 +214,7 @@ fn apply_settings(ui: &ClientWindow, state: &SharedState) {
         c.ib_port_paper = v;
     }
     c.ib_account = ui.get_account().trim().to_string();
+    persist::save(&c);
 }
 
 fn recent_log(state: &SharedState) -> String {
