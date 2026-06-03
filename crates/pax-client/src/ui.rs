@@ -1,245 +1,309 @@
-//! Client GUI — themed control panel built on the shared pax-ui design system.
+//! Client GUI — native Win32 (GDI) via native-windows-gui. Renders on ANY Windows
+//! machine, including RDP/VPS with no OpenGL. No web, no headless.
 
+use std::cell::Cell;
+use std::os::windows::process::CommandExt;
+use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
-use eframe::egui::{self, RichText};
-use pax_ui as ui;
+use native_windows_gui as nwg;
 
 use crate::state::{AccountMode, ExecutionMode, LogLevel, SharedState, TradeMode};
 
-pub struct ClientApp {
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+struct App {
     state: Arc<SharedState>,
+    window: nwg::Window,
+    status_label: nwg::Label,
+    balance_label: nwg::Label,
+    master_label: nwg::Label,
+    counts_label: nwg::Label,
+    start_btn: nwg::Button,
+    stop_btn: nwg::Button,
+    close_btn: nwg::Button,
+    kill_btn: nwg::Button,
+    save_btn: nwg::Button,
+    account_combo: nwg::ComboBox<&'static str>,
+    trade_combo: nwg::ComboBox<&'static str>,
+    exec_combo: nwg::ComboBox<&'static str>,
+    mult_input: nwg::TextInput,
+    dd_input: nwg::TextInput,
+    notional_input: nwg::TextInput,
+    qty_input: nwg::TextInput,
+    host_input: nwg::TextInput,
+    live_input: nwg::TextInput,
+    paper_input: nwg::TextInput,
+    log_box: nwg::TextBox,
+    log_seen: Cell<usize>,
+    timer: nwg::AnimationTimer,
 }
 
-impl ClientApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, state: Arc<SharedState>) -> Self {
-        ui::install(&cc.egui_ctx);
-        ClientApp { state }
-    }
+pub fn run(state: Arc<SharedState>) {
+    nwg::init().expect("Failed to init native Windows GUI");
+    nwg::enable_visual_styles();
 
-    fn start(&self) {
-        self.state.start_engine();
-    }
+    let app = Rc::new(build(state));
+    let evt = app.clone();
+    let handler = nwg::full_bind_event_handler(&app.window.handle, move |event, _data, handle| {
+        use nwg::Event as E;
+        match event {
+            E::OnTimerTick => {
+                if handle == evt.timer.handle {
+                    refresh(&evt);
+                }
+            }
+            E::OnButtonClick => {
+                if handle == evt.start_btn.handle {
+                    save_settings(&evt);
+                    evt.state.start_engine();
+                } else if handle == evt.stop_btn.handle {
+                    evt.state.stop_engine();
+                } else if handle == evt.close_btn.handle {
+                    evt.state.request_close_all();
+                } else if handle == evt.save_btn.handle {
+                    save_settings(&evt);
+                    evt.state.log(LogLevel::Info, "Settings saved.");
+                } else if handle == evt.kill_btn.handle {
+                    kill_other_instances();
+                    evt.state.log(LogLevel::Warn, "Kill switch: terminated other instances.");
+                }
+            }
+            E::OnWindowClose => {
+                if handle == evt.window.handle {
+                    nwg::stop_thread_dispatch();
+                }
+            }
+            _ => {}
+        }
+    });
 
-    fn stop(&self) {
-        self.state.stop_engine();
+    app.timer.start();
+    refresh(&app);
+    nwg::dispatch_thread_events();
+    nwg::unbind_event_handler(&handler);
+}
+
+fn build(state: Arc<SharedState>) -> App {
+    let c = state.controls.lock().clone();
+
+    let mut window = nwg::Window::default();
+    nwg::Window::builder()
+        .size((700, 760))
+        .title("Pax Americana — Client")
+        .flags(nwg::WindowFlags::WINDOW | nwg::WindowFlags::VISIBLE)
+        .build(&mut window)
+        .expect("window");
+
+    let label = |text: &str, x: i32, y: i32, w: i32, win: &nwg::Window| {
+        let mut l = nwg::Label::default();
+        nwg::Label::builder().text(text).parent(win).position((x, y)).size((w, 22)).build(&mut l).expect("label");
+        l
+    };
+    let input = |text: &str, x: i32, y: i32, w: i32, win: &nwg::Window| {
+        let mut t = nwg::TextInput::default();
+        nwg::TextInput::builder().text(text).parent(win).position((x, y)).size((w, 24)).build(&mut t).expect("input");
+        t
+    };
+    let button = |text: &str, x: i32, y: i32, w: i32, win: &nwg::Window| {
+        let mut b = nwg::Button::default();
+        nwg::Button::builder().text(text).parent(win).position((x, y)).size((w, 30)).build(&mut b).expect("button");
+        b
+    };
+    let combo = |opts: Vec<&'static str>, sel: usize, x: i32, y: i32, w: i32, win: &nwg::Window| {
+        let mut cb = nwg::ComboBox::default();
+        nwg::ComboBox::builder().collection(opts).selected_index(Some(sel)).parent(win).position((x, y)).size((w, 24)).build(&mut cb).expect("combo");
+        cb
+    };
+
+    let status_label = label("Stopped", 16, 12, 660, &window);
+    let _ = label("PAX AMERICANA — CLIENT", 16, 38, 660, &window);
+    let balance_label = label("Net Liquidation: —", 16, 64, 320, &window);
+    let master_label = label("Master: —", 340, 64, 330, &window);
+    let counts_label = label("M·C 0·0   Opened 0  Closed 0  Failed 0", 16, 90, 660, &window);
+
+    let _ = label("Engine", 16, 124, 200, &window);
+    let start_btn = button("▶ START", 16, 148, 110, &window);
+    let stop_btn = button("■ STOP", 134, 148, 90, &window);
+    let close_btn = button("CLOSE ALL", 232, 148, 120, &window);
+    let kill_btn = button("KILL OTHER INSTANCES", 362, 148, 190, &window);
+
+    let _ = label("Settings", 16, 192, 200, &window);
+    let _ = label("Account", 16, 222, 90, &window);
+    let account_combo = combo(vec!["Live", "Paper"], if c.account_mode == AccountMode::Live { 0 } else { 1 }, 110, 220, 110, &window);
+    let _ = label("Trading", 240, 222, 70, &window);
+    let trade_combo = combo(vec!["Long & Short", "Long Only"], if c.trade_mode == TradeMode::LongOnly { 1 } else { 0 }, 320, 220, 140, &window);
+
+    let _ = label("Execution", 16, 254, 90, &window);
+    let exec_combo = combo(vec!["Existing + New", "New Only"], if c.execution_mode == ExecutionMode::NewOnly { 1 } else { 0 }, 110, 252, 160, &window);
+
+    let _ = label("Multiplier ×", 16, 288, 100, &window);
+    let mult_input = input(&format!("{:.1}", c.multiplier), 120, 286, 80, &window);
+    let _ = label("Max Drawdown %", 230, 288, 110, &window);
+    let dd_input = input(&format!("{:.1}", c.max_drawdown_pct), 350, 286, 80, &window);
+
+    let _ = label("Max Pos $ (0=off)", 16, 320, 110, &window);
+    let notional_input = input(&format!("{:.0}", c.max_position_notional), 130, 318, 100, &window);
+    let _ = label("Max Pos Qty (0=off)", 250, 320, 120, &window);
+    let qty_input = input(&format!("{:.0}", c.max_position_qty), 380, 318, 100, &window);
+
+    let _ = label("IB Host", 16, 352, 90, &window);
+    let host_input = input(&c.ib_host, 110, 350, 180, &window);
+    let _ = label("Live port", 16, 384, 90, &window);
+    let live_input = input(&c.ib_port_live.to_string(), 110, 382, 80, &window);
+    let _ = label("Paper port", 230, 384, 80, &window);
+    let paper_input = input(&c.ib_port_paper.to_string(), 320, 382, 80, &window);
+
+    let save_btn = button("SAVE SETTINGS", 16, 418, 160, &window);
+    let _ = label("Gateway 4001/4002 · TWS 7496/7497 · host & ports apply on START", 190, 424, 480, &window);
+
+    let _ = label("Live Order Feed", 16, 458, 300, &window);
+    let mut log_box = nwg::TextBox::default();
+    nwg::TextBox::builder().parent(&window).position((16, 482)).size((664, 230)).readonly(true).build(&mut log_box).expect("log");
+
+    let mut timer = nwg::AnimationTimer::default();
+    nwg::AnimationTimer::builder().parent(&window).interval(Duration::from_millis(600)).active(true).build(&mut timer).expect("timer");
+
+    App {
+        state,
+        window,
+        status_label,
+        balance_label,
+        master_label,
+        counts_label,
+        start_btn,
+        stop_btn,
+        close_btn,
+        kill_btn,
+        save_btn,
+        account_combo,
+        trade_combo,
+        exec_combo,
+        mult_input,
+        dd_input,
+        notional_input,
+        qty_input,
+        host_input,
+        live_input,
+        paper_input,
+        log_box,
+        log_seen: Cell::new(0),
+        timer,
     }
 }
 
-impl eframe::App for ClientApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.request_repaint_after(std::time::Duration::from_millis(400));
-
-        let status = self.state.status.lock().clone();
-        let running = self.state.is_running();
-
-        // ── header ───────────────────────────────────────────────────────────
-        egui::TopBottomPanel::top("hdr")
-            .frame(egui::Frame::default().fill(ui::BG_PANEL).inner_margin(egui::Margin::symmetric(16, 12)))
-            .show(ctx, |uic| {
-                uic.horizontal(|uic| {
-                    ui::brand(uic, "CLIENT");
-                    uic.with_layout(egui::Layout::right_to_left(egui::Align::Center), |uic| {
-                        uic.label(RichText::new(ui::money(status.client_balance)).color(ui::GREEN).strong().size(16.0));
-                        uic.label(RichText::new("NET LIQ").color(ui::TEXT_FAINT).size(10.5).strong());
-                    });
-                });
-            });
-
-        // ── status strip ───────────────────────────────────────────────────────
-        egui::TopBottomPanel::top("statusbar")
-            .frame(egui::Frame::default().fill(ui::BG).inner_margin(egui::Margin::symmetric(16, 7)))
-            .show(ctx, |uic| {
-                uic.horizontal(|uic| {
-                    let (dot, label, tc) = if status.drawdown_hit {
-                        (ui::AMBER, "Drawdown halt", ui::AMBER)
-                    } else if status.connected {
-                        (ui::GREEN, "Connected — syncing", ui::GREEN)
-                    } else {
-                        (ui::RED, "Disconnected", ui::RED)
-                    };
-                    ui::status_pill(uic, dot, label, tc);
-                    let mdot = if status.master_connected { ui::GREEN } else { ui::RED };
-                    ui::status_pill(uic, mdot, &format!("Master {}", ui::money(status.master_balance)), ui::TEXT);
-                    uic.label(
-                        RichText::new(format!("M {} · C {} pos", status.master_positions, status.client_positions))
-                            .color(ui::CYAN)
-                            .monospace(),
-                    );
-                    if !status.last_sync.is_empty() {
-                        uic.with_layout(egui::Layout::right_to_left(egui::Align::Center), |uic| {
-                            uic.label(RichText::new(format!("last sync {}", status.last_sync)).color(ui::TEXT_DIM).monospace());
-                        });
-                    }
-                });
-            });
-
-        // ── order feed (bottom) ──────────────────────────────────────────────────
-        egui::TopBottomPanel::bottom("feed")
-            .resizable(true)
-            .default_height(230.0)
-            .frame(egui::Frame::default().fill(ui::BG).inner_margin(egui::Margin::same(16)))
-            .show(ctx, |uic| {
-                uic.horizontal(|uic| {
-                    uic.label(RichText::new("▍").color(ui::EMBER).size(13.0));
-                    uic.label(RichText::new("LIVE ORDER FEED").color(ui::TEXT_DIM).strong().size(11.5));
-                    uic.with_layout(egui::Layout::right_to_left(egui::Align::Center), |uic| {
-                        if uic.add(egui::Button::new(RichText::new("clear").color(ui::TEXT_DIM)).fill(ui::BG_ELEV)).clicked() {
-                            self.state.log.lock().clear();
-                        }
-                    });
-                });
-                uic.add_space(6.0);
-                egui::Frame::default()
-                    .fill(ui::BG_INPUT)
-                    .stroke(egui::Stroke::new(1.0, ui::BORDER))
-                    .corner_radius(egui::CornerRadius::same(10))
-                    .inner_margin(egui::Margin::same(10))
-                    .show(uic, |uic| {
-                        egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(uic, |uic| {
-                            let log = self.state.log.lock();
-                            for line in log.lines() {
-                                let col = match line.level {
-                                    LogLevel::Ok => ui::GREEN,
-                                    LogLevel::Warn => ui::AMBER,
-                                    LogLevel::Err => ui::RED,
-                                    LogLevel::Info => ui::INFO,
-                                    LogLevel::Buy => ui::GREEN,
-                                    LogLevel::Sell => ui::RED,
-                                };
-                                uic.label(RichText::new(format!("{}  {}", line.ts, line.msg)).color(col).monospace());
-                            }
-                        });
-                    });
-            });
-
-        // ── controls (central) ───────────────────────────────────────────────────
-        egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(ui::BG).inner_margin(egui::Margin::same(16)))
-            .show(ctx, |uic| {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(uic, |uic| {
-                    let mut controls = self.state.controls.lock();
-
-                    ui::section(uic, "Connection", |uic| {
-                        uic.horizontal(|uic| {
-                            uic.label(RichText::new("Account").color(ui::TEXT_DIM));
-                            ui::segmented(
-                                uic,
-                                &mut controls.account_mode,
-                                &[(AccountMode::Live, "Live"), (AccountMode::Paper, "Paper")],
-                            );
-                            uic.add_space(12.0);
-                            let clicked = if running {
-                                ui::stop_button(uic, "■  STOP").clicked()
-                            } else {
-                                ui::go_button(uic, "▶  START").clicked()
-                            };
-                            if clicked {
-                                if running {
-                                    self.stop();
-                                } else {
-                                    self.start();
-                                }
-                            }
-                            if ui::warn_button(uic, "CLOSE ALL").clicked() {
-                                self.state.request_close_all();
-                            }
-                        });
-                        uic.add_space(6.0);
-                        uic.add_enabled_ui(!running, |uic| {
-                            egui::Grid::new("client_conn").num_columns(4).spacing([12.0, 6.0]).show(uic, |uic| {
-                                uic.label(RichText::new("IB Host").color(ui::TEXT_DIM));
-                                uic.add(egui::TextEdit::singleline(&mut controls.ib_host).desired_width(150.0));
-                                uic.end_row();
-                                uic.label(RichText::new("Live port").color(ui::TEXT_DIM));
-                                uic.add(egui::DragValue::new(&mut controls.ib_port_live).range(1..=65535).speed(1.0));
-                                uic.label(RichText::new("Paper port").color(ui::TEXT_DIM));
-                                uic.add(egui::DragValue::new(&mut controls.ib_port_paper).range(1..=65535).speed(1.0));
-                                uic.end_row();
-                            });
-                        });
-                        uic.label(
-                            RichText::new(
-                                "Gateway: 4001 live / 4002 paper · TWS: 7496 / 7497 · applied on START",
-                            )
-                            .color(ui::TEXT_FAINT)
-                            .size(10.5),
-                        );
-                    });
-                    uic.add_space(10.0);
-
-                    ui::section(uic, "Execution Mode", |uic| {
-                        ui::segmented(
-                            uic,
-                            &mut controls.execution_mode,
-                            &[
-                                (ExecutionMode::ExistingPlusNew, "Existing + New"),
-                                (ExecutionMode::NewOnly, "New Trades Only"),
-                            ],
-                        );
-                        uic.add_space(4.0);
-                        uic.label(
-                            RichText::new(
-                                "Full sync mirrors the master's entire structure: opens missing, closes orphans, resizes.",
-                            )
-                            .color(ui::TEXT_FAINT)
-                            .size(11.0),
-                        );
-                    });
-                    uic.add_space(10.0);
-
-                    ui::section(uic, "Trading Mode", |uic| {
-                        ui::segmented(
-                            uic,
-                            &mut controls.trade_mode,
-                            &[(TradeMode::LongShort, "Long & Short"), (TradeMode::LongOnly, "Long Only")],
-                        );
-                        uic.add_space(4.0);
-                        uic.label(
-                            RichText::new("Long Only clamps every target to ≥ 0 — a short can never be opened.")
-                                .color(ui::TEXT_FAINT)
-                                .size(11.0),
-                        );
-                    });
-                    uic.add_space(10.0);
-
-                    ui::section(uic, "Risk Management", |uic| {
-                        egui::Grid::new("risk").num_columns(2).spacing([16.0, 10.0]).show(uic, |uic| {
-                            uic.label(RichText::new("Size Multiplier").color(ui::TEXT_DIM));
-                            uic.add(egui::Slider::new(&mut controls.multiplier, 0.1..=5.0).suffix("×").fixed_decimals(1));
-                            uic.end_row();
-
-                            uic.label(RichText::new("Max Drawdown").color(ui::TEXT_DIM));
-                            uic.add(egui::Slider::new(&mut controls.max_drawdown_pct, 1.0..=50.0).suffix("%").fixed_decimals(1));
-                            uic.end_row();
-
-                            uic.label(RichText::new("Max Position $ (0=off)").color(ui::TEXT_DIM));
-                            uic.add(egui::DragValue::new(&mut controls.max_position_notional).speed(500.0).range(0.0..=1.0e9));
-                            uic.end_row();
-
-                            uic.label(RichText::new("Max Position Qty (0=off)").color(ui::TEXT_DIM));
-                            uic.add(egui::DragValue::new(&mut controls.max_position_qty).speed(10.0).range(0.0..=1.0e7));
-                            uic.end_row();
-                        });
-                        uic.add_space(4.0);
-                        uic.label(
-                            RichText::new(format!(
-                                "Proportional sizing ×{:.1}. Trading halts if drawdown exceeds {:.1}%.",
-                                controls.multiplier, controls.max_drawdown_pct
-                            ))
-                            .color(ui::TEXT_FAINT)
-                            .size(11.0),
-                        );
-                    });
-                    drop(controls);
-
-                    uic.add_space(10.0);
-                    uic.columns(3, |cols| {
-                        ui::stat_tile(&mut cols[0], "Opened", &status.orders_placed.to_string(), ui::GREEN);
-                        ui::stat_tile(&mut cols[1], "Closed / Reduced", &status.orders_closed.to_string(), ui::INFO);
-                        ui::stat_tile(&mut cols[2], "Failed", &status.orders_failed.to_string(), ui::RED);
-                    });
-                });
-            });
+fn save_settings(app: &App) {
+    let mut c = app.state.controls.lock();
+    c.account_mode = match app.account_combo.selection() {
+        Some(0) => AccountMode::Live,
+        _ => AccountMode::Paper,
+    };
+    c.trade_mode = match app.trade_combo.selection() {
+        Some(1) => TradeMode::LongOnly,
+        _ => TradeMode::LongShort,
+    };
+    c.execution_mode = match app.exec_combo.selection() {
+        Some(1) => ExecutionMode::NewOnly,
+        _ => ExecutionMode::ExistingPlusNew,
+    };
+    if let Ok(v) = app.mult_input.text().trim().parse::<f64>() {
+        c.multiplier = v.clamp(0.1, 5.0);
     }
+    if let Ok(v) = app.dd_input.text().trim().parse::<f64>() {
+        c.max_drawdown_pct = v.clamp(1.0, 50.0);
+    }
+    if let Ok(v) = app.notional_input.text().trim().parse::<f64>() {
+        c.max_position_notional = v.max(0.0);
+    }
+    if let Ok(v) = app.qty_input.text().trim().parse::<f64>() {
+        c.max_position_qty = v.max(0.0);
+    }
+    let host = app.host_input.text().trim().to_string();
+    if !host.is_empty() {
+        c.ib_host = host;
+    }
+    if let Ok(v) = app.live_input.text().trim().parse::<u16>() {
+        c.ib_port_live = v;
+    }
+    if let Ok(v) = app.paper_input.text().trim().parse::<u16>() {
+        c.ib_port_paper = v;
+    }
+}
+
+fn refresh(app: &App) {
+    let s = app.state.status.lock().clone();
+    let running = app.state.is_running();
+
+    app.status_label.set_text(if s.drawdown_hit {
+        "⚠ DRAWDOWN HALT"
+    } else if s.connected {
+        "● CONNECTED — syncing"
+    } else if running {
+        "… connecting"
+    } else {
+        "■ STOPPED"
+    });
+    app.balance_label.set_text(&format!("Net Liquidation: {}", money(s.client_balance)));
+    app.master_label.set_text(&format!("Master: {}", money(s.master_balance)));
+    app.counts_label.set_text(&format!(
+        "M·C {}·{}   Opened {}  Closed {}  Failed {}",
+        s.master_positions, s.client_positions, s.orders_placed, s.orders_closed, s.orders_failed
+    ));
+    app.start_btn.set_text(if running { "▶ RUNNING" } else { "▶ START" });
+
+    let (count, text) = {
+        let log = app.state.log.lock();
+        let lines = log.lines();
+        let count = lines.len();
+        let start = count.saturating_sub(300);
+        let text: String = lines[start..]
+            .iter()
+            .map(|l| format!("[{}] {} {}\r\n", l.ts, tag(l.level), l.msg))
+            .collect();
+        (count, text)
+    };
+    if count != app.log_seen.get() {
+        app.log_box.set_text(&text);
+        app.log_seen.set(count);
+    }
+}
+
+fn tag(l: LogLevel) -> &'static str {
+    match l {
+        LogLevel::Ok => "OK  ",
+        LogLevel::Warn => "WARN",
+        LogLevel::Err => "ERR ",
+        LogLevel::Info => "INFO",
+        LogLevel::Buy => "BUY ",
+        LogLevel::Sell => "SELL",
+    }
+}
+
+fn money(v: f64) -> String {
+    let neg = v < 0.0;
+    let whole = v.abs().trunc() as u64;
+    let cents = (v.abs().fract() * 100.0).round() as u64;
+    let mut s = whole.to_string();
+    let mut grouped = String::new();
+    while s.len() > 3 {
+        let split = s.len() - 3;
+        grouped = format!(",{}{}", &s[split..], grouped);
+        s.truncate(split);
+    }
+    grouped = format!("{s}{grouped}");
+    format!("{}${}.{:02}", if neg { "-" } else { "" }, grouped, cents)
+}
+
+/// Kill switch: terminate every other instance of this executable.
+pub fn kill_other_instances() {
+    let pid = std::process::id();
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "pax-client.exe".to_string());
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/IM", &exe, "/FI", &format!("PID ne {pid}")])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
 }

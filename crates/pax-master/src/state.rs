@@ -90,7 +90,6 @@ impl ConnParams {
 pub struct SharedState {
     pub snapshot: Mutex<MasterSnapshot>,
     pub log: Mutex<LogBuffer>,
-    pub http_bind: String,
     /// GUI-editable connection params; the IB worker reads them on (re)connect.
     pub conn: Mutex<ConnParams>,
     /// Bumped by the GUI to ask the worker to drop and reconnect with fresh params.
@@ -98,17 +97,10 @@ pub struct SharedState {
 }
 
 impl SharedState {
-    pub fn new(
-        host: String,
-        port_live: u16,
-        port_paper: u16,
-        http_bind: String,
-        start_mode: IbMode,
-    ) -> Arc<Self> {
+    pub fn new(host: String, port_live: u16, port_paper: u16, start_mode: IbMode) -> Arc<Self> {
         Arc::new(SharedState {
             snapshot: Mutex::new(MasterSnapshot::default()),
             log: Mutex::new(LogBuffer::default()),
-            http_bind,
             conn: Mutex::new(ConnParams {
                 host,
                 port_live,
@@ -133,32 +125,8 @@ impl SharedState {
     }
 
     pub fn log(&self, level: LogLevel, msg: impl Into<String>) {
-        let msg = msg.into();
-        // Mirror to the console so the master is observable headless and windowed.
-        // Sanitize to ASCII so the Windows console code page doesn't mojibake the dashes.
-        let tag = match level {
-            LogLevel::Ok => "OK  ",
-            LogLevel::Warn => "WARN",
-            LogLevel::Err => "ERR ",
-            LogLevel::Info => "INFO",
-        };
-        println!("[{}] {tag} {}", now_hms(), ascii_console(&msg));
         self.log.lock().push(level, msg);
     }
-}
-
-/// Replace the handful of non-ASCII glyphs we use so console output stays clean.
-pub fn ascii_console(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            '—' | '–' => '-',
-            '…' => '~',
-            '✓' => '*',
-            '▍' | '⬢' | '●' => ' ',
-            c if c.is_ascii() => c,
-            _ => '?',
-        })
-        .collect()
 }
 
 pub fn now_hms() -> String {

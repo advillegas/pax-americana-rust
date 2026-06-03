@@ -19,10 +19,6 @@ pub struct ClientConfig {
     /// After placing an order for a symbol, suppress further orders for it for this
     /// many seconds so fills can settle (prevents duplicate submissions).
     pub order_cooldown_secs: u64,
-    /// Address the browser control panel binds to.
-    pub panel_bind: String,
-    /// Optional key protecting the control panel (it can START/STOP and CLOSE ALL).
-    pub panel_key: String,
 }
 
 impl Default for ClientConfig {
@@ -35,8 +31,6 @@ impl Default for ClientConfig {
             ib_port_paper: 4002,
             sync_interval_secs: 2,
             order_cooldown_secs: 10,
-            panel_bind: "0.0.0.0:5002".to_string(),
-            panel_key: String::new(),
         }
     }
 }
@@ -64,8 +58,6 @@ impl ClientConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(d.order_cooldown_secs),
-            panel_bind: env::var("PAX_PANEL_BIND").unwrap_or(d.panel_bind),
-            panel_key: env::var("PAX_PANEL_KEY").unwrap_or(d.panel_key),
         }
     }
 }

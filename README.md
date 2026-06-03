@@ -144,37 +144,23 @@ netsh advfirewall firewall add rule name="PaxAmericana" dir=in action=allow prot
 
 ## Run
 
-**Master server:**
-```bash
-pax-master
-```
-The master runs as a console daemon. It also serves a **web control panel** at
-`http://<host>:5001/` — open it in any browser (on the VPS or remotely) to monitor status
-and edit the host/port/mode live. The web panel needs no graphics stack, so it's the
-recommended UI on VPS/headless/RDP machines where the native OpenGL GUI can't render.
+**Master** (`pax-master.exe`) — a single standalone Windows executable with a **native
+Win32 GUI** that renders on any Windows machine, including RDP/VPS sessions (GDI, no
+OpenGL/GPU required). The window shows connection status, balance, position count, and a
+live log, and lets you edit **Host / Live port / Paper port / Mode** with **APPLY &
+RECONNECT**. It also serves the HTTP data API the client polls: `GET /snapshot`,
+`GET /status`, `GET /balance` (protected by `X-API-Key` when `PAX_API_KEY` is set).
 
-The master also opens an optional native monitoring GUI when a display + OpenGL are
-available; if not, it detects this, prints a notice, and **keeps running headless** (IB
-worker + HTTP API + web panel stay up). To skip the native GUI explicitly:
-```bash
-pax-master --headless        # or set PAX_HEADLESS=1 — the web panel still works
-```
-Serves: `GET /snapshot` (full structure), `GET /status`, `GET /balance`. When
-`PAX_API_KEY` is set, all endpoints require the `X-API-Key` header.
+**Kill switch:** the master kills any other instances of itself on launch (so stale
+copies can't clog the port), and the **KILL OTHER INSTANCES** button does the same on
+demand. Closing the window exits the process fully.
 
-**Client server(s):**
-```bash
-pax-client                   # native GUI if available, else headless + web panel
-pax-client --headless        # skip the native GUI (recommended on a VPS)
-```
-The client serves a **web control panel** at `http://<host>:5002/` — open it in any
-browser to pick **Live/Paper**, set the **multiplier** / **max drawdown** / trading &
-execution modes, edit the IB host/ports, and **START / STOP / CLOSE ALL**. Like the
-master, it falls back to the web panel when no OpenGL is available. Because the panel can
-place/flatten trades, set **`PAX_PANEL_KEY`** (and restrict `PAX_PANEL_BIND`) whenever it's
-reachable beyond localhost.
-
-The native GUI offers the same controls when a display + OpenGL are present.
+**Client(s)** (`pax-client.exe`) — a single standalone Windows executable with the same
+native Win32 GUI. Pick **Live/Paper**, set the **multiplier** / **max drawdown** / trading
+& execution modes, edit the IB host/ports, then **SAVE SETTINGS** and **START**.
+**CLOSE ALL** cancels working orders and flattens every client position with market
+orders. Host/ports/account apply on START; multiplier/drawdown/modes apply live. Same
+**KILL OTHER INSTANCES** button + launch-time cleanup as the master.
 
 ---
 

@@ -59,9 +59,6 @@ impl LogBuffer {
             self.lines.drain(0..overflow);
         }
     }
-    pub fn clear(&mut self) {
-        self.lines.clear();
-    }
     pub fn lines(&self) -> &[LogLine] {
         &self.lines
     }
@@ -141,16 +138,6 @@ impl SharedState {
     }
 
     pub fn log(&self, level: LogLevel, msg: impl Into<String>) {
-        let msg = msg.into();
-        let tag = match level {
-            LogLevel::Ok => "OK  ",
-            LogLevel::Warn => "WARN",
-            LogLevel::Err => "ERR ",
-            LogLevel::Info => "INFO",
-            LogLevel::Buy => "BUY ",
-            LogLevel::Sell => "SELL",
-        };
-        println!("[{}] {tag} {}", now_hms(), ascii_console(&msg));
         self.log.lock().push(level, msg);
     }
 
@@ -189,19 +176,6 @@ impl SharedState {
     }
 }
 
-/// Replace the handful of non-ASCII glyphs we use so console output stays clean.
-pub fn ascii_console(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            '—' | '–' => '-',
-            '…' => '~',
-            '✓' => '*',
-            '●' | '▍' | '⬢' => ' ',
-            c if c.is_ascii() => c,
-            _ => '?',
-        })
-        .collect()
-}
 
 pub fn now_hms() -> String {
     let secs = SystemTime::now()
