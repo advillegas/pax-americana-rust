@@ -1,6 +1,6 @@
 //! Shared, thread-safe client state: GUI-set controls, engine-set status, and a log.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -150,6 +150,16 @@ pub struct PortfolioRow {
     pub unrealized_pnl: f64,
 }
 
+/// A raw OHLC bar as fetched from IB. The full set is kept so the GUI can pan/zoom
+/// (re-window) without re-querying historical data.
+#[derive(Default, Clone, Copy)]
+pub struct RawBar {
+    pub o: f32,
+    pub h: f32,
+    pub l: f32,
+    pub c: f32,
+}
+
 /// One candlestick's geometry, normalized to a 0..100 box (y inverted: 0 = top = max price).
 #[derive(Default, Clone)]
 pub struct Candle {
@@ -204,6 +214,21 @@ pub struct SharedState {
     pub chart_request: AtomicBool,
     /// Precomputed chart (path + labels), produced by the data thread.
     pub chart: Mutex<ChartView>,
+    // ── Chart view window (pan / zoom over `chart_bars`) ──────────────────────
+    /// The full set of bars for the loaded symbol (kept so pan/zoom can re-window).
+    pub chart_bars: Mutex<Vec<RawBar>>,
+    /// Open-position average cost for the loaded symbol (charted as a line).
+    pub chart_avg: Mutex<Option<f64>>,
+    /// Timeframe label of the loaded data (e.g. "6M"), for the status line.
+    pub chart_label: Mutex<String>,
+    /// Number of visible bars (zoom level).
+    pub chart_count: AtomicUsize,
+    /// Index of the first visible bar (pan offset).
+    pub chart_start: AtomicUsize,
+    /// Snapshot of `chart_start` captured at the beginning of a drag.
+    pub chart_anchor: AtomicUsize,
+    /// Bumped whenever `chart` is re-rendered, so the GUI knows to push it.
+    pub chart_gen: AtomicU64,
 }
 
 impl SharedState {
@@ -222,6 +247,13 @@ impl SharedState {
             chart_tf: AtomicU8::new(3), // 6M default
             chart_request: AtomicBool::new(false),
             chart: Mutex::new(ChartView::default()),
+            chart_bars: Mutex::new(Vec::new()),
+            chart_avg: Mutex::new(None),
+            chart_label: Mutex::new(String::new()),
+            chart_count: AtomicUsize::new(90),
+            chart_start: AtomicUsize::new(0),
+            chart_anchor: AtomicUsize::new(0),
+            chart_gen: AtomicU64::new(0),
         })
     }
 

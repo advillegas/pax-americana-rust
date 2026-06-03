@@ -146,6 +146,84 @@ fn main() {
             }
         });
     }
+    // ── Chart pan / scroll / zoom (re-window the stored bars, no IB round-trip) ──
+    {
+        // Capture the current pan offset at the start of a drag.
+        let state = state.clone();
+        ui.on_chart_drag_begin(move || {
+            let start = state.chart_start.load(std::sync::atomic::Ordering::Relaxed);
+            state.chart_anchor.store(start, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
+    {
+        // While dragging, translate the pixel delta into a bar offset from the anchor.
+        let state = state.clone();
+        let w = ui.as_weak();
+        ui.on_chart_drag_to(move |delta_px, width_px| {
+            let Some(ui) = w.upgrade() else { return };
+            use std::sync::atomic::Ordering::Relaxed;
+            let len = state.chart_bars.lock().len() as i64;
+            let count = state.chart_count.load(Relaxed) as i64;
+            if len == 0 || count == 0 || width_px <= 0.0 {
+                return;
+            }
+            let bar_px = (width_px / count as f32).max(0.001);
+            let bars = (delta_px / bar_px).round() as i64;
+            let anchor = state.chart_anchor.load(Relaxed) as i64;
+            // Drag right (positive delta) reveals older bars → window moves earlier.
+            let new_start = (anchor - bars).clamp(0, (len - count).max(0)) as usize;
+            state.chart_start.store(new_start, Relaxed);
+            data::rerender(&state);
+            push_chart(&ui, &state);
+        });
+    }
+    {
+        // Scroll the wheel to slide through time: forward (up) or back (down).
+        let state = state.clone();
+        let w = ui.as_weak();
+        ui.on_chart_scroll(move |forward| {
+            let Some(ui) = w.upgrade() else { return };
+            use std::sync::atomic::Ordering::Relaxed;
+            let len = state.chart_bars.lock().len() as i64;
+            let count = state.chart_count.load(Relaxed) as i64;
+            if len == 0 {
+                return;
+            }
+            let step = (count / 6).max(1);
+            let start = state.chart_start.load(Relaxed) as i64;
+            let delta = if forward { step } else { -step };
+            let new_start = (start + delta).clamp(0, (len - count).max(0)) as usize;
+            state.chart_start.store(new_start, Relaxed);
+            data::rerender(&state);
+            push_chart(&ui, &state);
+        });
+    }
+    {
+        // '=' zooms in (fewer bars), '-' zooms out (more bars), anchored to the right edge.
+        let state = state.clone();
+        let w = ui.as_weak();
+        ui.on_chart_zoom(move |zoom_in| {
+            let Some(ui) = w.upgrade() else { return };
+            use std::sync::atomic::Ordering::Relaxed;
+            let len = state.chart_bars.lock().len();
+            if len == 0 {
+                return;
+            }
+            let count = state.chart_count.load(Relaxed);
+            let start = state.chart_start.load(Relaxed);
+            let end = start + count; // keep the right edge fixed while zooming
+            let new_count = if zoom_in {
+                (count * 4 / 5).max(8).min(len)
+            } else {
+                ((count * 5 / 4) + 1).min(len)
+            };
+            let new_start = end.saturating_sub(new_count).min(len - new_count);
+            state.chart_count.store(new_count, Relaxed);
+            state.chart_start.store(new_start, Relaxed);
+            data::rerender(&state);
+            push_chart(&ui, &state);
+        });
+    }
 
     let timer = slint::Timer::default();
     {
@@ -153,7 +231,7 @@ fn main() {
         let w = ui.as_weak();
         let mut last_accounts: Vec<String> = Vec::new();
         let mut last_port_sig = String::new();
-        let mut last_chart_sig = String::new();
+        let mut last_chart_gen: u64 = 0;
         timer.start(slint::TimerMode::Repeated, Duration::from_millis(500), move || {
             let Some(ui) = w.upgrade() else { return };
             let s = state.status.lock().clone();
@@ -235,36 +313,12 @@ fn main() {
                 }
             }
 
-            // ── Chart (copy precomputed candles/labels when they change) ──────
+            // ── Chart (copy precomputed candles/labels when the data thread re-renders) ──
             {
-                let c = state.chart.lock().clone();
-                let sig = format!("{}|{}|{}|{}", c.symbol, c.status, c.candles.len(), c.last_label);
-                if sig != last_chart_sig {
-                    last_chart_sig = sig;
-                    let model: Vec<Candle> = c
-                        .candles
-                        .iter()
-                        .map(|k| Candle {
-                            cx: k.cx,
-                            bw: k.bw,
-                            high_y: k.high_y,
-                            low_y: k.low_y,
-                            top_y: k.top_y,
-                            bot_y: k.bot_y,
-                            up: k.up,
-                        })
-                        .collect();
-                    ui.set_candles(std::rc::Rc::new(slint::VecModel::from(model)).into());
-                    ui.set_chart_status(c.status.into());
-                    ui.set_chart_min(c.min_label.into());
-                    ui.set_chart_max(c.max_label.into());
-                    ui.set_chart_last(c.last_label.into());
-                    ui.set_chart_up(c.up);
-                    ui.set_chart_min_val(c.min_val);
-                    ui.set_chart_max_val(c.max_val);
-                    ui.set_avg_present(c.avg_present);
-                    ui.set_avg_y(c.avg_y);
-                    ui.set_avg_label(c.avg_label.into());
+                let gen = state.chart_gen.load(std::sync::atomic::Ordering::Relaxed);
+                if gen != last_chart_gen {
+                    last_chart_gen = gen;
+                    push_chart(&ui, &state);
                 }
             }
 
@@ -283,6 +337,36 @@ fn main() {
     }
 
     ui.run().expect("failed to run GUI");
+}
+
+/// Copy the precomputed `ChartView` from shared state into the GUI's chart properties.
+/// Called by the timer on a fresh load and directly by the pan/scroll/zoom callbacks.
+fn push_chart(ui: &ClientWindow, state: &SharedState) {
+    let c = state.chart.lock().clone();
+    let model: Vec<Candle> = c
+        .candles
+        .iter()
+        .map(|k| Candle {
+            cx: k.cx,
+            bw: k.bw,
+            high_y: k.high_y,
+            low_y: k.low_y,
+            top_y: k.top_y,
+            bot_y: k.bot_y,
+            up: k.up,
+        })
+        .collect();
+    ui.set_candles(std::rc::Rc::new(slint::VecModel::from(model)).into());
+    ui.set_chart_status(c.status.into());
+    ui.set_chart_min(c.min_label.into());
+    ui.set_chart_max(c.max_label.into());
+    ui.set_chart_last(c.last_label.into());
+    ui.set_chart_up(c.up);
+    ui.set_chart_min_val(c.min_val);
+    ui.set_chart_max_val(c.max_val);
+    ui.set_avg_present(c.avg_present);
+    ui.set_avg_y(c.avg_y);
+    ui.set_avg_label(c.avg_label.into());
 }
 
 fn apply_settings(ui: &ClientWindow, state: &SharedState) {

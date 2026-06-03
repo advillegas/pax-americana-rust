@@ -19,7 +19,7 @@ use ibapi::market_data::historical::{BarSize, Duration as HDuration, WhatToShow}
 use ibapi::market_data::TradingHours;
 
 use crate::config::{stable_client_id, ClientConfig};
-use crate::state::{AccountMode, Candle, ChartView, LogLevel, PortfolioRow, SharedState};
+use crate::state::{AccountMode, Candle, ChartView, LogLevel, PortfolioRow, RawBar, SharedState};
 
 pub fn spawn(cfg: ClientConfig, state: Arc<SharedState>) {
     thread::spawn(move || data_main(cfg, state));
@@ -127,8 +127,7 @@ fn data_main(_cfg: ClientConfig, state: Arc<SharedState>) {
                     // Chart the open-position average cost if we hold the symbol.
                     let avg = book.get(&sym).map(|r| r.avg_cost).filter(|c| *c > 0.0);
                     state.chart.lock().status = format!("Loading {sym}…");
-                    let view = load_chart(&client, &sym, tf, avg);
-                    *state.chart.lock() = view;
+                    load_into_state(&client, &state, &sym, tf, avg);
                 }
             }
 
@@ -154,79 +153,138 @@ fn timeframe(tf: u8) -> (BarSize, HDuration, &'static str) {
     }
 }
 
-/// Fetch bars and build the candlestick chart view for `symbol`. `avg` (open-position
-/// average cost) is charted as a horizontal line and folded into the price range.
-fn load_chart(client: &Client, symbol: &str, tf: u8, avg: Option<f64>) -> ChartView {
+/// Default number of bars shown on a fresh load (the initial zoom level).
+const DEFAULT_VISIBLE: usize = 90;
+/// Tightest zoom (fewest bars) and the minimum slice we will render.
+const MIN_VISIBLE: usize = 8;
+
+/// Fetch bars for `symbol`, store the full set in shared state, reset the view window to
+/// the most-recent `DEFAULT_VISIBLE` bars, then render. `avg` (open-position average cost)
+/// is charted as a horizontal line and folded into the price range.
+fn load_into_state(client: &Client, state: &SharedState, symbol: &str, tf: u8, avg: Option<f64>) {
     let (bar_size, duration, label) = timeframe(tf);
     let contract = Contract::stock(symbol).on_exchange("SMART").in_currency("USD").build();
 
     let hd = match client.historical_data(&contract, None, duration, bar_size, WhatToShow::Trades, TradingHours::Regular) {
         Ok(h) => h,
         Err(e) => {
-            return ChartView {
+            *state.chart_bars.lock() = Vec::new();
+            *state.chart.lock() = ChartView {
                 symbol: symbol.to_string(),
                 status: format!("{symbol}: chart unavailable ({e})"),
                 ..Default::default()
             };
+            state.chart_gen.fetch_add(1, Ordering::Relaxed);
+            return;
         }
     };
 
-    let bars = &hd.bars;
-    if bars.len() < 2 {
-        return ChartView {
+    if hd.bars.len() < 2 {
+        *state.chart_bars.lock() = Vec::new();
+        *state.chart.lock() = ChartView {
             symbol: symbol.to_string(),
             status: format!("{symbol}: no data (market-data permissions?)"),
             ..Default::default()
         };
+        state.chart_gen.fetch_add(1, Ordering::Relaxed);
+        return;
     }
 
-    // Price range spans the wicks (low..high), and the avg line if we hold the position.
-    let mut lo = bars.iter().map(|b| b.low).fold(f64::INFINITY, f64::min);
-    let mut hi = bars.iter().map(|b| b.high).fold(f64::NEG_INFINITY, f64::max);
+    let raw: Vec<RawBar> = hd
+        .bars
+        .iter()
+        .map(|b| RawBar { o: b.open as f32, h: b.high as f32, l: b.low as f32, c: b.close as f32 })
+        .collect();
+    let len = raw.len();
+    let count = len.min(DEFAULT_VISIBLE).max(MIN_VISIBLE.min(len));
+
+    *state.chart_bars.lock() = raw;
+    *state.chart_avg.lock() = avg;
+    *state.chart_symbol.lock() = symbol.to_string();
+    *state.chart_label.lock() = label.to_string();
+    state.chart_count.store(count, Ordering::Relaxed);
+    state.chart_start.store(len - count, Ordering::Relaxed);
+    rerender(state);
+}
+
+/// Re-window the stored bars using the current `chart_start` / `chart_count` and publish a
+/// fresh `ChartView`. Called both after a load (data thread) and on every pan/zoom (GUI
+/// thread) — it never touches IB, so interaction stays snappy.
+pub fn rerender(state: &SharedState) {
+    let bars = state.chart_bars.lock();
+    let len = bars.len();
+    if len == 0 {
+        return;
+    }
+    // Clamp the window to the available data and write the clamped values back.
+    let count = state.chart_count.load(Ordering::Relaxed).clamp(MIN_VISIBLE.min(len).max(1), len);
+    let start = state.chart_start.load(Ordering::Relaxed).min(len - count);
+    state.chart_count.store(count, Ordering::Relaxed);
+    state.chart_start.store(start, Ordering::Relaxed);
+
+    let avg = *state.chart_avg.lock();
+    let symbol = state.chart_symbol.lock().clone();
+    let label = state.chart_label.lock().clone();
+    let view = render_window(&bars[start..start + count], &symbol, &label, len, avg);
+    drop(bars);
+
+    *state.chart.lock() = view;
+    state.chart_gen.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Build a `ChartView` for a slice of bars. The price range is taken from the *visible*
+/// slice (so zooming/panning rescales the y-axis), plus the avg line when present.
+fn render_window(slice: &[RawBar], symbol: &str, label: &str, total: usize, avg: Option<f64>) -> ChartView {
+    if slice.is_empty() {
+        return ChartView { symbol: symbol.to_string(), status: format!("{symbol}: no data"), ..Default::default() };
+    }
+
+    let mut lo = slice.iter().map(|b| b.l).fold(f32::INFINITY, f32::min);
+    let mut hi = slice.iter().map(|b| b.h).fold(f32::NEG_INFINITY, f32::max);
     if let Some(a) = avg {
-        lo = lo.min(a);
-        hi = hi.max(a);
+        lo = lo.min(a as f32);
+        hi = hi.max(a as f32);
     }
     let span = (hi - lo).max(1e-9);
-    let y_of = |p: f64| (100.0 - (p - lo) / span * 100.0) as f32;
+    let y_of = |p: f32| 100.0 - (p - lo) / span * 100.0;
 
-    let n = bars.len();
-    let slot = 100.0 / n as f64;
-    let bw = (slot * 0.7) as f32;
-    let candles: Vec<Candle> = bars
+    let n = slice.len();
+    let slot = 100.0 / n as f32;
+    let bw = slot * 0.7;
+    let candles: Vec<Candle> = slice
         .iter()
         .enumerate()
         .map(|(i, b)| {
-            let top = b.open.max(b.close); // higher price → smaller y
-            let bot = b.open.min(b.close);
+            let top = b.o.max(b.c); // higher price → smaller y
+            let bot = b.o.min(b.c);
             Candle {
-                cx: ((i as f64 + 0.5) * slot) as f32,
+                cx: (i as f32 + 0.5) * slot,
                 bw,
-                high_y: y_of(b.high),
-                low_y: y_of(b.low),
+                high_y: y_of(b.h),
+                low_y: y_of(b.l),
                 top_y: y_of(top),
                 bot_y: y_of(bot),
-                up: b.close >= b.open,
+                up: b.c >= b.o,
             }
         })
         .collect();
 
-    let first = bars[0].close;
-    let last = bars.last().unwrap().close;
+    let first = slice[0].c;
+    let last = slice[n - 1].c;
     let chg_pct = if first.abs() > 1e-9 { (last - first) / first * 100.0 } else { 0.0 };
 
     ChartView {
         symbol: symbol.to_string(),
-        status: format!("{symbol} · {label} · {n} bars"),
+        status: format!("{symbol} · {label} · {n}/{total} bars  (drag/scroll to pan, =/- to zoom)"),
         candles,
-        min_val: lo as f32,
-        max_val: hi as f32,
+        min_val: lo,
+        max_val: hi,
         min_label: format!("{lo:.2}"),
         max_label: format!("{hi:.2}"),
         last_label: format!("{last:.2}  ({chg_pct:+.2}%)"),
         up: last >= first,
         avg_present: avg.is_some(),
-        avg_y: avg.map(y_of).unwrap_or(0.0),
+        avg_y: avg.map(|a| y_of(a as f32)).unwrap_or(0.0),
         avg_label: avg.map(|a| format!("avg {a:.2}")).unwrap_or_default(),
     }
 }

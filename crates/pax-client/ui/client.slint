@@ -143,6 +143,10 @@ export component ClientWindow inherits Window {
     callback detect_accounts();
     callback load_chart();
     callback view_symbol(string);
+    callback chart_drag_begin();
+    callback chart_drag_to(length, length); // (delta-x from press, plot width)
+    callback chart_scroll(bool);            // true = forward in time
+    callback chart_zoom(bool);              // true = zoom in
 
     VerticalLayout {
         padding: 16px;
@@ -497,8 +501,43 @@ export component ClientWindow inherits Window {
                         }
                     }
 
-                    // Crosshair + price readout on hover.
-                    cross := TouchArea { }
+                    // Keyboard zoom (= in, - out); focused when the plot is clicked.
+                    fs := FocusScope {
+                        width: 0px;
+                        height: 0px;
+                        key-pressed(e) => {
+                            if (e.text == "=" || e.text == "+") {
+                                root.chart_zoom(true);
+                                return EventResult.accept;
+                            }
+                            if (e.text == "-" || e.text == "_") {
+                                root.chart_zoom(false);
+                                return EventResult.accept;
+                            }
+                            return EventResult.reject;
+                        }
+                    }
+
+                    // Crosshair + price readout on hover; drag to pan, scroll to slide.
+                    cross := TouchArea {
+                        property <length> press_x;
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down) {
+                                fs.focus();
+                                self.press_x = self.mouse-x;
+                                root.chart_drag_begin();
+                            }
+                        }
+                        moved => {
+                            if (self.pressed) {
+                                root.chart_drag_to(self.mouse-x - self.press_x, parent.width);
+                            }
+                        }
+                        scroll-event(e) => {
+                            root.chart_scroll(e.delta-y < 0px);
+                            return EventResult.accept;
+                        }
+                    }
                     if cross.has-hover : Rectangle {
                         x: cross.mouse-x; width: 1px; height: 100%; background: #ffffff40;
                     }
