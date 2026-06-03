@@ -6,20 +6,18 @@
 //! mirror orders, a restart resumes the SAME matched structure and only resizes if the
 //! master's ledger actually changed while the client was down.
 //!
-//! Storage is deliberately out-of-sight: a hidden, obfuscated file under the user's
-//! LocalAppData rather than a readable JSON beside the executable.
+//! Stored as a hidden, obfuscated file under LocalAppData (see [`crate::appdata`]).
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::windows::process::CommandExt;
-use std::path::{Path, PathBuf};
 
 use pax_core::WorkingOrder;
 use serde::{Deserialize, Serialize};
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-/// Repeating XOR key — not cryptographic, just keeps the file from being plainly readable.
-const OBFS_KEY: &[u8] = b"px-amrcn-2026-ledger-obfuscation-key";
+use crate::appdata;
+
+const FILE: &str = "lx.dat";
+const LEGACY: &str = "pax-client.ledger.json";
 
 #[derive(Default, Serialize, Deserialize)]
 pub struct Ledger {
@@ -33,62 +31,18 @@ pub struct Ledger {
     pub desired: Vec<WorkingOrder>,
 }
 
-/// Hidden app-data directory, created (and hidden) on first use.
-fn dir() -> Option<PathBuf> {
-    let base = std::env::var("LOCALAPPDATA")
-        .ok()
-        .or_else(|| std::env::var("APPDATA").ok())
-        .or_else(|| std::env::var("USERPROFILE").ok())?;
-    let d = PathBuf::from(base).join("NeroAI").join("cache");
-    let existed = d.exists();
-    fs::create_dir_all(&d).ok()?;
-    if !existed {
-        hide(&d);
-    }
-    Some(d)
-}
-
-fn path() -> Option<PathBuf> {
-    Some(dir()?.join("lx.dat"))
-}
-
-/// Legacy plaintext location (beside the exe) — migrated away from and deleted.
-fn legacy_path() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    Some(exe.parent()?.join("pax-client.ledger.json"))
-}
-
-/// Best-effort Windows "hidden" attribute (no console flash).
-fn hide(p: &Path) {
-    let _ = std::process::Command::new("attrib")
-        .args(["+h", &p.to_string_lossy()])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-}
-
-/// Reversible, non-cryptographic byte obfuscation so the file isn't human-readable.
-fn obfuscate(data: &mut [u8]) {
-    for (i, b) in data.iter_mut().enumerate() {
-        *b ^= OBFS_KEY[i % OBFS_KEY.len()];
-    }
-}
-
 /// Load the saved ledger if it exists AND belongs to `account`. Returns `None` otherwise
 /// (a fresh start), so a different account never inherits another account's targets.
 /// Transparently migrates a legacy plaintext file, then removes it.
 pub fn load(account: &str) -> Option<Ledger> {
-    // Preferred: hidden, obfuscated file.
-    if let Some(p) = path() {
-        if let Ok(mut bytes) = fs::read(&p) {
-            obfuscate(&mut bytes);
-            if let Ok(l) = serde_json::from_slice::<Ledger>(&bytes) {
-                return if l.account == account { Some(l) } else { None };
-            }
+    if let Some(bytes) = appdata::read(FILE) {
+        if let Ok(l) = serde_json::from_slice::<Ledger>(&bytes) {
+            return if l.account == account { Some(l) } else { None };
         }
     }
     // Migration: pick up an old plaintext ledger once, then delete it so it isn't left
-    // openly available. Re-save happens on the next periodic write.
-    if let Some(old) = legacy_path() {
+    // openly available (re-save to the hidden location happens on the next periodic write).
+    if let Some(old) = appdata::legacy(LEGACY) {
         if let Ok(s) = fs::read_to_string(&old) {
             let _ = fs::remove_file(&old);
             if let Ok(l) = serde_json::from_str::<Ledger>(&s) {
@@ -106,17 +60,13 @@ pub fn save(
     targets: &BTreeMap<String, f64>,
     desired: &[WorkingOrder],
 ) {
-    let Some(p) = path() else { return };
     let l = Ledger {
         account: account.to_string(),
         fingerprint: fingerprint.clone(),
         targets: targets.clone(),
         desired: desired.to_vec(),
     };
-    if let Ok(mut bytes) = serde_json::to_vec(&l) {
-        obfuscate(&mut bytes);
-        if fs::write(&p, bytes).is_ok() {
-            hide(&p);
-        }
+    if let Ok(bytes) = serde_json::to_vec(&l) {
+        appdata::write(FILE, bytes);
     }
 }

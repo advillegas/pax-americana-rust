@@ -1,12 +1,17 @@
-//! Persist client settings to a JSON file beside the executable so operator choices
-//! survive restarts.
+//! Persist client settings so operator choices survive restarts.
+//!
+//! Stored as a hidden, obfuscated file under LocalAppData (see [`crate::appdata`]) rather
+//! than a readable JSON beside the executable.
 
 use std::fs;
-use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::appdata;
 use crate::state::{AccountMode, Controls, ExecutionMode, TradeMode};
+
+const FILE: &str = "st.dat";
+const LEGACY: &str = "pax-client.settings.json";
 
 #[derive(Serialize, Deserialize)]
 struct Persisted {
@@ -21,21 +26,12 @@ struct Persisted {
     ib_port_live: u16,
     ib_port_paper: u16,
     ib_account: String,
-    /// Default false so older settings files (without this key) keep 24h behavior.
+    /// Default false so older settings (without this key) keep 24h behavior.
     #[serde(default)]
     rth_only: bool,
 }
 
-fn path() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    Some(exe.parent()?.join("pax-client.settings.json"))
-}
-
-/// Overlay saved settings onto `c` (called at startup, after env/config defaults).
-pub fn load_into(c: &mut Controls) {
-    let Some(p) = path() else { return };
-    let Ok(s) = fs::read_to_string(&p) else { return };
-    let Ok(ps) = serde_json::from_str::<Persisted>(&s) else { return };
+fn apply(c: &mut Controls, ps: Persisted) {
     c.account_mode = ps.account_mode;
     c.trade_mode = ps.trade_mode;
     c.execution_mode = ps.execution_mode;
@@ -50,9 +46,28 @@ pub fn load_into(c: &mut Controls) {
     c.rth_only = ps.rth_only;
 }
 
+/// Overlay saved settings onto `c` (called at startup, after env/config defaults).
+/// Transparently migrates a legacy plaintext file, then removes it and re-saves hidden.
+pub fn load_into(c: &mut Controls) {
+    if let Some(bytes) = appdata::read(FILE) {
+        if let Ok(ps) = serde_json::from_slice::<Persisted>(&bytes) {
+            apply(c, ps);
+            return;
+        }
+    }
+    if let Some(old) = appdata::legacy(LEGACY) {
+        if let Ok(s) = fs::read_to_string(&old) {
+            let _ = fs::remove_file(&old);
+            if let Ok(ps) = serde_json::from_str::<Persisted>(&s) {
+                apply(c, ps);
+                save(c); // re-persist to the hidden location
+            }
+        }
+    }
+}
+
 /// Write the current settings to disk (best-effort; ignores I/O errors).
 pub fn save(c: &Controls) {
-    let Some(p) = path() else { return };
     let ps = Persisted {
         account_mode: c.account_mode,
         trade_mode: c.trade_mode,
@@ -67,7 +82,7 @@ pub fn save(c: &Controls) {
         ib_account: c.ib_account.clone(),
         rth_only: c.rth_only,
     };
-    if let Ok(json) = serde_json::to_string_pretty(&ps) {
-        let _ = fs::write(p, json);
+    if let Ok(bytes) = serde_json::to_vec(&ps) {
+        appdata::write(FILE, bytes);
     }
 }

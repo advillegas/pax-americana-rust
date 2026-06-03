@@ -9,6 +9,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod appdata;
 mod config;
 mod engine;
 mod ib;
