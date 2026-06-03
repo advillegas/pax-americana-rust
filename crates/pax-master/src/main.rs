@@ -27,9 +27,10 @@ fn main() {
     // CPU/software rendering — works without a GPU/OpenGL (RDP/VPS friendly).
     std::env::set_var("SLINT_BACKEND", "winit-software");
 
-    // Kill switch on launch: clear stale instances so they don't clog the port.
+    // Kill switch on launch: clear stale instances so they don't clog the port or hold
+    // the TWS clientId. Wait long enough for the OS to release the socket + IB session.
     kill_other_instances();
-    std::thread::sleep(Duration::from_millis(400));
+    std::thread::sleep(Duration::from_millis(1500));
 
     let cfg = MasterConfig::from_env();
     let state = SharedState::new(cfg.ib_host.clone(), cfg.ib_port_live, cfg.ib_port_paper, cfg.start_mode);

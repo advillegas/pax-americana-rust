@@ -12,11 +12,18 @@ use crate::state::{LogLevel, SharedState};
 
 pub fn spawn(bind: String, api_key: String, state: Arc<SharedState>) {
     thread::spawn(move || {
-        let server = match Server::http(&bind) {
-            Ok(s) => s,
-            Err(e) => {
-                state.log(LogLevel::Err, format!("HTTP bind failed on {bind}: {e} (another instance? use Kill Other Instances)"));
-                return;
+        // Retry binding: if a stale instance still holds the port, keep trying so we
+        // grab it the moment it frees up (e.g. after Kill Other Instances).
+        let server = loop {
+            match Server::http(&bind) {
+                Ok(s) => break s,
+                Err(e) => {
+                    state.log(
+                        LogLevel::Err,
+                        format!("HTTP bind failed on {bind}: {e} — another instance is holding the port. Use KILL OTHER INSTANCES. Retrying in 3s…"),
+                    );
+                    thread::sleep(std::time::Duration::from_secs(3));
+                }
             }
         };
         state.log(LogLevel::Ok, format!("HTTP API listening on {bind}"));

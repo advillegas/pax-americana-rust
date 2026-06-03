@@ -29,7 +29,7 @@ fn main() {
     std::env::set_var("SLINT_BACKEND", "winit-software");
 
     kill_other_instances();
-    std::thread::sleep(Duration::from_millis(400));
+    std::thread::sleep(Duration::from_millis(1500));
 
     let cfg = ClientConfig::from_env();
     let state = SharedState::new();
