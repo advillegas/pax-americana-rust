@@ -168,6 +168,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
     let mut drawdown_hit = false;
     let mut last_unreachable_warn: Option<Instant> = None;
     let mut last_margin_warn: Option<Instant> = None;
+    let mut last_offhours_log: Option<Instant> = None;
     let cooldown_dur = Duration::from_secs(cfg.order_cooldown_secs);
     // Symbols the master already held at session start — used by "New Only" mode to
     // suppress opening pre-existing master positions. Captured on first snapshot.
@@ -335,6 +336,22 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         }
 
         let controls = state.controls.lock().clone();
+
+        // Off-hours guard: when RTH-only is enabled, place no orders outside US equity
+        // regular trading hours. We keep status/positions/master updated above, but skip
+        // the trading channels AND the master-change gate, so a master move during the
+        // close is synced when the session reopens (not lost, not acted on off-hours).
+        if controls.rth_only && !crate::market_hours::is_us_equity_rth_now() {
+            let warn = last_offhours_log
+                .map(|t| t.elapsed() > Duration::from_secs(300))
+                .unwrap_or(true);
+            if warn {
+                state.log(LogLevel::Info, "Outside regular trading hours — holding (RTH-only).".to_string());
+                last_offhours_log = Some(Instant::now());
+            }
+            sleep_running(cfg.sync_interval_secs, state);
+            continue;
+        }
 
         let sizing = SizingParams {
             multiplier: controls.multiplier,

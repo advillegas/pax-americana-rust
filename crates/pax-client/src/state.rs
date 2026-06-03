@@ -84,6 +84,9 @@ pub struct Controls {
     pub ib_account: String,
     /// Master HTTP URL the client polls (editable in the GUI; applied on START).
     pub master_url: String,
+    /// When true, place no orders outside US equity regular trading hours (09:30–16:00 ET,
+    /// Mon–Fri). The engine keeps polling and reflecting status; it just won't trade.
+    pub rth_only: bool,
 }
 
 impl Default for Controls {
@@ -101,6 +104,7 @@ impl Default for Controls {
             ib_port_paper: 4002,
             ib_account: String::new(),
             master_url: "http://148.113.203.188:5001".to_string(),
+            rth_only: false,
         }
     }
 }
