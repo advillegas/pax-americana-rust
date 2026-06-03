@@ -55,6 +55,7 @@ fn main() {
         ui.set_drawdown(format!("{:.1}", c.max_drawdown_pct).into());
         ui.set_max_notional(format!("{:.0}", c.max_position_notional).into());
         ui.set_max_qty(format!("{:.0}", c.max_position_qty).into());
+        ui.set_min_cushion(format!("{:.0}", c.min_cushion_pct).into());
         ui.set_host(c.ib_host.clone().into());
         ui.set_live_port(c.ib_port_live.to_string().into());
         ui.set_paper_port(c.ib_port_paper.to_string().into());
@@ -130,6 +131,17 @@ fn main() {
                 )
                 .into(),
             );
+            ui.set_margin_blocked(s.margin_blocks_opens);
+            ui.set_margin_text(
+                format!(
+                    "Cushion {:.0}%   Excess {}   SMA {}{}",
+                    s.cushion * 100.0,
+                    money(s.excess_liquidity),
+                    money(s.sma),
+                    if s.margin_blocks_opens { "   — OPENS BLOCKED (margin)" } else { "" }
+                )
+                .into(),
+            );
             ui.set_log_text(recent_log(&state).into());
         });
     }
@@ -153,6 +165,9 @@ fn apply_settings(ui: &ClientWindow, state: &SharedState) {
     }
     if let Ok(v) = ui.get_max_qty().trim().parse::<f64>() {
         c.max_position_qty = v.max(0.0);
+    }
+    if let Ok(v) = ui.get_min_cushion().trim().parse::<f64>() {
+        c.min_cushion_pct = v.clamp(0.0, 90.0);
     }
     let host = ui.get_host().trim().to_string();
     if !host.is_empty() {

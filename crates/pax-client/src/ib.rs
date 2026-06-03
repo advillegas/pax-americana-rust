@@ -34,26 +34,53 @@ pub fn read_positions(client: &Client) -> Result<Vec<Position>, String> {
     Ok(out)
 }
 
-/// Read NetLiquidation in USD for the connected account.
-pub fn read_balance(client: &Client) -> Result<f64, String> {
+/// Account margin / SMA snapshot used for risk gating.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MarginInfo {
+    pub net_liq: f64,
+    pub excess_liquidity: f64,
+    pub available_funds: f64,
+    pub buying_power: f64,
+    /// IBKR Cushion = (ELV - maintenance margin) / ELV, in 0..1 (0 ⇒ liquidation).
+    pub cushion: f64,
+    /// Special Memorandum Account; negative ⇒ Reg-T / Fed call.
+    pub sma: f64,
+    pub maint_margin: f64,
+}
+
+/// Read NetLiquidation + margin/SMA fields for the connected account in one request.
+pub fn read_margin(client: &Client) -> Result<MarginInfo, String> {
     let group = AccountGroup("All".to_string());
-    let sub = client
-        .account_summary(&group, &["NetLiquidation"])
-        .map_err(|e| e.to_string())?;
-    let mut balance = 0.0_f64;
+    let tags = [
+        "NetLiquidation",
+        "ExcessLiquidity",
+        "AvailableFunds",
+        "BuyingPower",
+        "Cushion",
+        "SMA",
+        "FullMaintMarginReq",
+    ];
+    let sub = client.account_summary(&group, &tags).map_err(|e| e.to_string())?;
+    let mut m = MarginInfo::default();
     for item in &sub {
         match item {
             AccountSummaryResult::Summary(s) => {
-                if s.tag == "NetLiquidation" {
-                    if let Ok(v) = s.value.parse::<f64>() {
-                        balance = v;
-                    }
+                let v = s.value.parse::<f64>().unwrap_or(0.0);
+                match s.tag.as_str() {
+                    "NetLiquidation" => m.net_liq = v,
+                    "ExcessLiquidity" => m.excess_liquidity = v,
+                    "AvailableFunds" => m.available_funds = v,
+                    "BuyingPower" => m.buying_power = v,
+                    "Cushion" => m.cushion = v,
+                    "SMA" => m.sma = v,
+                    "FullMaintMarginReq" => m.maint_margin = v,
+                    _ => {}
                 }
             }
             AccountSummaryResult::End => break,
         }
     }
-    Ok(balance)
+    Ok(m)
 }
 
 /// Place a single order described by side/qty/kind. `qty` must be a positive whole

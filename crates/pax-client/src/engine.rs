@@ -73,7 +73,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         .ok()
         .and_then(|a| a.into_iter().next())
         .unwrap_or_default();
-    let baseline = ib::read_balance(&client).unwrap_or(0.0);
+    let baseline = ib::read_margin(&client).map(|m| m.net_liq).unwrap_or(0.0);
     state.log(LogLevel::Ok, format!("IB connected ✓ account={account}  balance=${baseline:.2}"));
     state.with_status(|s| {
         s.connected = true;
@@ -86,6 +86,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
     let mut wo_cooldown: HashMap<String, Instant> = HashMap::new();
     let mut drawdown_hit = false;
     let mut last_unreachable_warn: Option<Instant> = None;
+    let mut last_margin_warn: Option<Instant> = None;
     let cooldown_dur = Duration::from_secs(cfg.order_cooldown_secs);
     // Symbols the master already held at session start — used by "New Only" mode to
     // suppress opening pre-existing master positions. Captured on first snapshot.
@@ -97,9 +98,34 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             do_close_all(&client, state);
         }
 
-        // ── client balance + drawdown guard ──────────────────────────────────
-        let client_balance = ib::read_balance(&client).unwrap_or(0.0);
-        let max_dd = state.controls.lock().max_drawdown_pct;
+        // ── balance + margin/SMA + drawdown guards ───────────────────────────
+        let margin = ib::read_margin(&client).unwrap_or_default();
+        let client_balance = margin.net_liq;
+        let (max_dd, min_cushion_pct) = {
+            let c = state.controls.lock();
+            (c.max_drawdown_pct, c.min_cushion_pct)
+        };
+        // Block opening/adding when margin is tight: cushion below the floor (when
+        // reported), no excess liquidity, or SMA negative (Reg-T/Fed call). De-risking
+        // (closes/reduces) is always allowed.
+        let opens_blocked = (margin.cushion > 0.0 && margin.cushion * 100.0 < min_cushion_pct)
+            || (margin.net_liq > 0.0 && margin.excess_liquidity <= 0.0)
+            || (margin.sma < 0.0);
+        if opens_blocked {
+            let warn = last_margin_warn.map(|t| t.elapsed() > Duration::from_secs(30)).unwrap_or(true);
+            if warn {
+                state.log(
+                    LogLevel::Warn,
+                    format!(
+                        "Margin guard: opens blocked (cushion {:.0}%, excess ${:.0}, SMA ${:.0}) — closes still allowed",
+                        margin.cushion * 100.0,
+                        margin.excess_liquidity,
+                        margin.sma
+                    ),
+                );
+                last_margin_warn = Some(Instant::now());
+            }
+        }
         if baseline > 0.0 && client_balance > 0.0 {
             let dd = (baseline - client_balance) / baseline * 100.0;
             if dd >= max_dd && !drawdown_hit {
@@ -150,6 +176,10 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             s.master_positions = snap.positions.len();
             s.client_positions = client_positions.len();
             s.last_sync = crate::state::now_hms();
+            s.excess_liquidity = margin.excess_liquidity;
+            s.cushion = margin.cushion;
+            s.sma = margin.sma;
+            s.margin_blocks_opens = opens_blocked;
         });
 
         if drawdown_hit {
@@ -183,6 +213,11 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             }
         }
         for w in &wdiff.to_place {
+            // Margin guard: don't place entry (opening) orders when margin is tight.
+            // Protective orders (stops/limits that reduce risk) still go through.
+            if opens_blocked && w.is_entry {
+                continue;
+            }
             if let Some(t) = wo_cooldown.get(&w.key()) {
                 if t.elapsed() < cooldown_dur {
                     continue;
@@ -238,6 +273,11 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             }
         } else {
             for intent in &result.intents {
+                // Margin guard: skip opening/increasing when margin is tight; always
+                // allow reduces/closes/flattens (they free margin).
+                if opens_blocked && is_opening(intent.reason) {
+                    continue;
+                }
                 // New-Only mode: skip opening positions the master already held at start.
                 // Orphan closes and reduces always proceed regardless of mode.
                 if controls.execution_mode == ExecutionMode::NewOnly
@@ -346,6 +386,13 @@ fn is_closing(reason: IntentReason) -> bool {
     matches!(
         reason,
         IntentReason::CloseOrphan | IntentReason::ReduceToTarget | IntentReason::FlattenLeg
+    )
+}
+
+fn is_opening(reason: IntentReason) -> bool {
+    matches!(
+        reason,
+        IntentReason::OpenMissing | IntentReason::IncreaseToTarget | IntentReason::OpenLeg
     )
 }
 

@@ -69,6 +69,8 @@ export component ClientWindow inherits Window {
     in property <string> balance_text: "Net Liquidation: -";
     in property <string> master_text: "Master: -";
     in property <string> counts_text;
+    in property <string> margin_text;
+    in property <bool> margin_blocked;
     in property <string> log_text;
 
     in-out property <int> account_mode;   // 0 live, 1 paper
@@ -78,6 +80,7 @@ export component ClientWindow inherits Window {
     in-out property <string> drawdown;
     in-out property <string> max_notional;
     in-out property <string> max_qty;
+    in-out property <string> min_cushion;
     in-out property <string> host;
     in-out property <string> live_port;
     in-out property <string> paper_port;
@@ -112,6 +115,11 @@ export component ClientWindow inherits Window {
             Text { text: root.master_text; color: #53b9f2; }
         }
         Text { text: root.counts_text; color: #909fb7; }
+        Text {
+            text: root.margin_text;
+            color: root.margin_blocked ? #f5b454 : #5a6880;
+            font-size: 12px;
+        }
 
         Text { text: "ENGINE"; color: #909fb7; font-size: 11px; font-weight: 700; }
         HorizontalLayout {
@@ -153,9 +161,11 @@ export component ClientWindow inherits Window {
         HorizontalLayout {
             spacing: 8px;
             Text { text: "Max Pos $"; color: #909fb7; width: 90px; vertical-alignment: center; }
-            LineField { value <=> root.max_notional; width: 100px; }
-            Text { text: "Max Pos Qty"; color: #909fb7; width: 120px; vertical-alignment: center; }
-            LineField { value <=> root.max_qty; width: 100px; }
+            LineField { value <=> root.max_notional; width: 90px; }
+            Text { text: "Max Pos Qty"; color: #909fb7; width: 100px; vertical-alignment: center; }
+            LineField { value <=> root.max_qty; width: 90px; }
+            Text { text: "Min Cushion %"; color: #909fb7; width: 110px; vertical-alignment: center; }
+            LineField { value <=> root.min_cushion; width: 70px; }
             Rectangle { }
         }
         HorizontalLayout {
