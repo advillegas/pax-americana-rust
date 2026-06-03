@@ -29,8 +29,8 @@ impl Default for ClientConfig {
             ib_host: "127.0.0.1".to_string(),
             ib_port_live: 4001,
             ib_port_paper: 4002,
-            sync_interval_secs: 10,
-            order_cooldown_secs: 20,
+            sync_interval_secs: 2,
+            order_cooldown_secs: 10,
         }
     }
 }

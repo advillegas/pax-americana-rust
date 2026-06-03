@@ -42,8 +42,9 @@ impossible.
 
 * **`crates/pax-core`** — shared models, proportional sizing, risk clamps, the
   reconciliation engine, and the theme palette. Pure Rust, fully unit-tested.
-* **`crates/pax-master`** — connects to the master's IB Gateway/TWS, tracks net positions
-  and balance, and serves an authoritative JSON snapshot over HTTP. Themed status GUI.
+* **`crates/pax-master`** — connects to the master's IB Gateway/TWS via a **persistent
+  streaming position subscription** (TWS pushes changes in real time, ~200ms), tracks net
+  positions and balance, and serves an authoritative JSON snapshot over HTTP. Themed GUI.
 * **`crates/pax-client`** — connects to its own IB Gateway/TWS, polls the master, and
   reconciles its book to a proportionally-scaled copy of the master's structure.
 

@@ -1,13 +1,15 @@
 //! IB Gateway / TWS worker thread for the master.
 //!
-//! Owns its own blocking `ibapi` client (one-client-per-thread model) and continuously
-//! republishes the master's net positions and NetLiquidation balance into shared state.
-//! All IB calls happen here; the GUI and HTTP server only read the shared snapshot.
+//! Owns its own blocking `ibapi` client (one-client-per-thread model). It holds a
+//! **persistent streaming position subscription** so position changes in TWS propagate
+//! into the shared snapshot the instant they happen, and refreshes NetLiquidation on a
+//! light timer. All IB calls happen here; the GUI and HTTP server only read the snapshot.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ibapi::accounts::types::AccountGroup;
 use ibapi::accounts::{AccountSummaryResult, PositionUpdate};
@@ -16,6 +18,11 @@ use pax_core::{MasterSnapshot, OrderKind, Position, PROTOCOL_SCHEMA};
 
 use crate::config::MasterConfig;
 use crate::state::{now_ms, LogLevel, SharedState};
+
+/// How often to refresh NetLiquidation (positions stream in real time independently).
+const BALANCE_REFRESH_SECS: u64 = 5;
+/// How often to republish the snapshot (keeps `generated_at_ms` fresh for liveness).
+const REPUBLISH_MS: u64 = 200;
 
 /// Spawn the master IB worker. Returns a handle; set the flag to stop.
 pub fn spawn(cfg: MasterConfig, state: Arc<SharedState>) -> Arc<AtomicBool> {
@@ -27,6 +34,8 @@ pub fn spawn(cfg: MasterConfig, state: Arc<SharedState>) -> Arc<AtomicBool> {
 
 fn worker_loop(cfg: MasterConfig, state: Arc<SharedState>, stop: Arc<AtomicBool>) {
     let endpoint = cfg.ib_endpoint();
+    let _ = cfg.refresh_secs; // balance cadence is fixed; positions are event-driven now
+
     while !stop.load(Ordering::Relaxed) {
         state.log(
             LogLevel::Info,
@@ -48,23 +57,72 @@ fn worker_loop(cfg: MasterConfig, state: Arc<SharedState>, stop: Arc<AtomicBool>
             .ok()
             .and_then(|a| a.into_iter().next())
             .unwrap_or_default();
-        state.log(LogLevel::Ok, format!("IB connected ✓ account={account}"));
+        state.log(LogLevel::Ok, format!("IB connected ✓ account={account} — streaming positions"));
 
-        // Steady-state refresh loop. Any error breaks out to reconnect.
+        // Open the persistent streaming position subscription: full replay first, then
+        // live incremental updates as positions change in TWS.
+        let pos_sub = match client.positions() {
+            Ok(s) => s,
+            Err(e) => {
+                state.log(LogLevel::Warn, format!("Position stream failed: {e} — reconnecting"));
+                mark_disconnected(&state);
+                sleep_interruptible(5, &stop);
+                continue;
+            }
+        };
+
+        let mut book: BTreeMap<String, Position> = BTreeMap::new();
+        let mut balance = read_balance(&client).unwrap_or(0.0);
+        let mut last_balance = Instant::now();
+
+        // Steady-state event loop.
         loop {
             if stop.load(Ordering::Relaxed) {
                 return;
             }
 
-            let positions = match read_positions(&client) {
-                Ok(p) => p,
-                Err(e) => {
-                    state.log(LogLevel::Warn, format!("Position read failed: {e} — reconnecting"));
-                    break;
+            // Drain all pending position updates without blocking.
+            while let Some(update) = pos_sub.try_next() {
+                match update {
+                    PositionUpdate::Position(p) => {
+                        let sym = p.contract.symbol.to_string();
+                        if p.position == 0.0 {
+                            book.remove(&sym);
+                        } else {
+                            book.insert(
+                                sym.clone(),
+                                Position {
+                                    symbol: sym,
+                                    currency: nonempty(p.contract.currency.to_string(), "USD"),
+                                    exchange: nonempty(p.contract.exchange.to_string(), "SMART"),
+                                    net_qty: p.position,
+                                    avg_cost: p.average_cost,
+                                    order_kind: OrderKind::Market,
+                                    limit_price: 0.0,
+                                    aux_price: 0.0,
+                                },
+                            );
+                        }
+                    }
+                    PositionUpdate::PositionEnd => {} // end of initial replay; updates follow
                 }
-            };
-            let balance = read_balance(&client).unwrap_or(0.0);
+            }
 
+            // Stream died (e.g. TWS dropped) → break out to reconnect.
+            if let Some(e) = pos_sub.error() {
+                state.log(LogLevel::Warn, format!("Position stream error: {e} — reconnecting"));
+                break;
+            }
+
+            // Light periodic balance refresh.
+            if last_balance.elapsed() >= Duration::from_secs(BALANCE_REFRESH_SECS) {
+                if let Ok(b) = read_balance(&client) {
+                    balance = b;
+                }
+                last_balance = Instant::now();
+            }
+
+            // Republish the snapshot (cheap; keeps liveness timestamp fresh).
             {
                 let mut snap = state.snapshot.lock();
                 *snap = MasterSnapshot {
@@ -72,12 +130,12 @@ fn worker_loop(cfg: MasterConfig, state: Arc<SharedState>, stop: Arc<AtomicBool>
                     connected: true,
                     account: account.clone(),
                     balance,
-                    positions,
+                    positions: book.values().cloned().collect(),
                     generated_at_ms: now_ms(),
                 };
             }
 
-            sleep_interruptible(cfg.refresh_secs.max(1), &stop);
+            thread::sleep(Duration::from_millis(REPUBLISH_MS));
         }
 
         mark_disconnected(&state);
@@ -89,38 +147,6 @@ fn mark_disconnected(state: &SharedState) {
     let mut snap = state.snapshot.lock();
     snap.connected = false;
     snap.generated_at_ms = now_ms();
-}
-
-/// Collect a full net-position snapshot, draining the subscription until `PositionEnd`.
-/// Sync subscriptions yield the value directly (errors surface via `.error()`).
-fn read_positions(client: &Client) -> Result<Vec<Position>, String> {
-    let sub = client.positions().map_err(|e| e.to_string())?;
-    let mut out: Vec<Position> = Vec::new();
-    for update in &sub {
-        match update {
-            PositionUpdate::Position(p) => {
-                let qty = p.position;
-                if qty == 0.0 {
-                    continue;
-                }
-                out.push(Position {
-                    symbol: p.contract.symbol.to_string(),
-                    currency: nonempty(p.contract.currency.to_string(), "USD"),
-                    exchange: nonempty(p.contract.exchange.to_string(), "SMART"),
-                    net_qty: qty,
-                    avg_cost: p.average_cost,
-                    order_kind: OrderKind::Market,
-                    limit_price: 0.0,
-                    aux_price: 0.0,
-                });
-            }
-            PositionUpdate::PositionEnd => break,
-        }
-    }
-    if let Some(e) = sub.error() {
-        return Err(e.to_string());
-    }
-    Ok(out)
 }
 
 /// Read NetLiquidation (USD) via an account-summary request. The tag is passed as a
