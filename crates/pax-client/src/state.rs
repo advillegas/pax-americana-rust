@@ -122,12 +122,21 @@ pub struct Status {
     pub margin_blocks_opens: bool,
 }
 
+/// Non-invasive update-check status surfaced in the GUI.
+#[derive(Default, Clone)]
+pub struct UpdateStatus {
+    pub message: String,
+    pub available: bool,
+    pub url: String,
+}
+
 pub struct SharedState {
     pub running: AtomicBool,
     pub close_all: AtomicBool,
     pub controls: Mutex<Controls>,
     pub status: Mutex<Status>,
     pub log: Mutex<LogBuffer>,
+    pub update: Mutex<UpdateStatus>,
 }
 
 impl SharedState {
@@ -138,6 +147,7 @@ impl SharedState {
             controls: Mutex::new(Controls::default()),
             status: Mutex::new(Status::default()),
             log: Mutex::new(LogBuffer::default()),
+            update: Mutex::new(UpdateStatus::default()),
         })
     }
 

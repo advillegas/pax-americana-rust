@@ -85,8 +85,13 @@ export component MasterWindow inherits Window {
     in-out property <string> paper_port;
     in-out property <int> mode;   // 0 = Live, 1 = Paper
 
+    in property <string> update_text;
+    in property <bool> update_available;
+
     callback apply();
     callback kill();
+    callback check_update();
+    callback download_update();
 
     VerticalLayout {
         padding: 16px;
@@ -143,6 +148,37 @@ export component MasterWindow inherits Window {
         }
 
         Text { text: "TWS 7496 live / 7497 paper   -   Gateway 4001 / 4002"; color: #5a6880; font-size: 11px; }
+
+        // Update notification (non-invasive): a line + buttons; never blocks anything.
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: root.update_text;
+                color: root.update_available ? #f5b454 : #5a6880;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+            Rectangle { }
+            if root.update_available : Rectangle {
+                width: 110px;
+                height: 26px;
+                border-radius: 7px;
+                background: dl.has-hover ? #3ee0a6 : #34d399;
+                dl := TouchArea { clicked => { root.download_update(); } }
+                Text { text: "DOWNLOAD"; color: #06080d; font-weight: 700; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+            }
+            Rectangle {
+                width: 140px;
+                height: 26px;
+                border-radius: 7px;
+                background: ck.has-hover ? #202c3e : #172130;
+                border-width: 1px;
+                border-color: #222d40;
+                ck := TouchArea { clicked => { root.check_update(); } }
+                Text { text: "Check for Updates"; color: #909fb7; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+            }
+        }
+
         Text { text: "LOG"; color: #909fb7; font-size: 11px; font-weight: 700; }
 
         Rectangle {

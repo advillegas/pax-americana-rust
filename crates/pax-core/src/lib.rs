@@ -16,6 +16,7 @@ pub mod protocol;
 pub mod reconcile;
 pub mod sizing;
 pub mod theme;
+pub mod update;
 
 pub use model::{OrderKind, Position, Side, WorkingOrder};
 pub use orders::{desired_working_orders, diff_working_orders, effective_positions, WorkingDiff};

@@ -43,6 +43,7 @@ fn main() {
     state.log(LogLevel::Info, format!("Pax Americana ready. Master: {}", cfg.master_url));
 
     engine::spawn(cfg.clone(), state.clone());
+    spawn_update_check(state.clone());
 
     let ui = ClientWindow::new().expect("failed to create window");
 
@@ -97,6 +98,17 @@ fn main() {
             state.log(LogLevel::Warn, "Kill switch: terminated other instances.");
         });
     }
+    {
+        let state = state.clone();
+        ui.on_check_update(move || spawn_update_check(state.clone()));
+    }
+    {
+        let state = state.clone();
+        ui.on_download_update(move || {
+            let url = state.update.lock().url.clone();
+            open_url(&url);
+        });
+    }
 
     let timer = slint::Timer::default();
     {
@@ -141,6 +153,11 @@ fn main() {
                 .into(),
             );
             ui.set_log_text(recent_log(&state).into());
+            {
+                let u = state.update.lock();
+                ui.set_update_text(u.message.clone().into());
+                ui.set_update_available(u.available);
+            }
         });
     }
 
@@ -210,6 +227,41 @@ fn money(v: f64) -> String {
     }
     grouped = format!("{s}{grouped}");
     format!("{}${}.{:02}", if neg { "-" } else { "" }, grouped, cents)
+}
+
+const UPDATE_REPO: &str = "advillegas/pax-americana-rust";
+
+/// Non-blocking update check on a background thread; result stored in shared state.
+fn spawn_update_check(state: std::sync::Arc<SharedState>) {
+    std::thread::spawn(move || {
+        state.update.lock().message = "Checking for updates…".to_string();
+        let repo = std::env::var("PAX_UPDATE_REPO").unwrap_or_else(|_| UPDATE_REPO.to_string());
+        let current = env!("CARGO_PKG_VERSION");
+        let mut u = state.update.lock();
+        match pax_core::update::check(&repo, current) {
+            Some(info) => {
+                u.available = true;
+                u.url = info.url;
+                u.message = format!("Update available: v{}  (you have v{current})", info.version);
+            }
+            None => {
+                u.available = false;
+                u.url.clear();
+                u.message = format!("Up to date (v{current})");
+            }
+        }
+    });
+}
+
+/// Open a URL in the default browser without flashing a console window.
+fn open_url(url: &str) {
+    if url.is_empty() {
+        return;
+    }
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn();
 }
 
 pub fn kill_other_instances() {

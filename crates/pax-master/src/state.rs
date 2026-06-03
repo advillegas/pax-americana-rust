@@ -87,6 +87,14 @@ impl ConnParams {
     }
 }
 
+/// Non-invasive update-check status surfaced in the GUI.
+#[derive(Default, Clone)]
+pub struct UpdateStatus {
+    pub message: String,
+    pub available: bool,
+    pub url: String,
+}
+
 pub struct SharedState {
     pub snapshot: Mutex<MasterSnapshot>,
     pub log: Mutex<LogBuffer>,
@@ -94,6 +102,8 @@ pub struct SharedState {
     pub conn: Mutex<ConnParams>,
     /// Bumped by the GUI to ask the worker to drop and reconnect with fresh params.
     pub reconnect_gen: AtomicU64,
+    /// Update-check result (background, non-blocking).
+    pub update: Mutex<UpdateStatus>,
 }
 
 impl SharedState {
@@ -108,6 +118,7 @@ impl SharedState {
                 mode: start_mode,
             }),
             reconnect_gen: AtomicU64::new(0),
+            update: Mutex::new(UpdateStatus::default()),
         })
     }
 
