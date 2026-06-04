@@ -29,11 +29,6 @@ use crate::state::{AccountMode, ExecutionMode, LogLevel, SharedState, TradeMode}
 const REJECT_BACKOFF_SECS: u64 = 60;
 /// Throttle repeated identical IBKR notice codes to at most once per this interval.
 const NOTICE_THROTTLE_SECS: u64 = 30;
-/// How long a just-placed market order's quantity is folded into the client's effective
-/// position (covering the fill → position-feed propagation gap) before it expires. Must
-/// exceed typical fill+propagation latency; over-counting within it only ever suppresses
-/// duplicate orders (the safe direction).
-const PENDING_TTL: Duration = Duration::from_secs(12);
 
 pub fn spawn(cfg: ClientConfig, state: Arc<SharedState>) {
     thread::spawn(move || engine_main(cfg, state));
@@ -173,11 +168,6 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
     let mut drawdown_hit = false;
     // M1: running peak equity (high-water mark) for a true max-drawdown control.
     let mut peak_balance = baseline;
-    // H2: net signed quantity of market orders placed recently, per symbol, with the time
-    // of the last placement. Folded into the client's effective position until it expires
-    // (PENDING_TTL) so a fill that hasn't propagated into the position feed yet is never
-    // double-ordered.
-    let mut pending: HashMap<String, (f64, Instant)> = HashMap::new();
     let mut last_unreachable_warn: Option<Instant> = None;
     let mut last_margin_warn: Option<Instant> = None;
     let mut last_offhours_log: Option<Instant> = None;
@@ -289,8 +279,6 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         // re-open to match the master. The operator presses START to clear the halt.
         if state.close_all.swap(false, Ordering::Relaxed) {
             do_close_all(&client, state, &account);
-            // Forget any pending/locked state so a resume re-derives cleanly from the master.
-            pending.clear();
             state.halted.store(true, Ordering::Relaxed);
             state.with_status(|s| s.halted = true);
             state.log(LogLevel::Warn, "CLOSE ALL complete — trading HALTED. Press START to resume.");
@@ -572,21 +560,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         // net won't market-fill what a resting limit order will cover; protective orders
         // ride alongside their position. Market orders here only correct genuine drift.
         let master_eff = effective_positions(&snap.positions, &snap.working_orders);
-        let mut client_eff = effective_positions(&client_positions, desired);
-
-        // H2: fold the net of recently-placed market orders into the client's effective
-        // position. This closes the window where an order has filled but IBKR's position
-        // feed hasn't updated yet — without it the engine would recompute "still under
-        // target" and fire a duplicate, overshooting. Entries expire after PENDING_TTL by
-        // which the feed has caught up; transient over-counting only suppresses duplicates.
-        pending.retain(|_, (_, t)| t.elapsed() < PENDING_TTL);
-        for (sym, (q, _)) in &pending {
-            if let Some(p) = client_eff.iter_mut().find(|p| &p.symbol == sym) {
-                p.net_qty += *q;
-            } else {
-                client_eff.push(pax_core::Position::new(sym.clone(), *q));
-            }
-        }
+        let client_eff = effective_positions(&client_positions, desired);
 
         let input = ReconcileInput {
             master: &master_eff,
@@ -665,15 +639,6 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
                     Ok(id) => {
                         placed_orders.insert(id, (intent.symbol.clone(), intent.side));
                         cooldown.insert(intent.symbol.clone(), Instant::now());
-                        // H2: record the signed quantity so subsequent cycles count this
-                        // order as already in-flight until the fill propagates (PENDING_TTL).
-                        let signed = match intent.side {
-                            Side::Buy => intent.qty,
-                            Side::Sell => -intent.qty,
-                        };
-                        let e = pending.entry(intent.symbol.clone()).or_insert((0.0, Instant::now()));
-                        e.0 += signed;
-                        e.1 = Instant::now();
                         let lvl = match intent.side {
                             Side::Buy => LogLevel::Buy,
                             Side::Sell => LogLevel::Sell,
