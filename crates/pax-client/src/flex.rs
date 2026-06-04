@@ -22,24 +22,31 @@ pub fn spawn(state: Arc<SharedState>) {
 
 fn worker_loop(state: Arc<SharedState>) {
     loop {
-        if state.flex_request.swap(false, Ordering::Relaxed) {
-            let (token, query_id) = {
-                let cfg = state.flex_config.lock();
-                (cfg.token.clone(), cfg.query_id.clone())
-            };
-            if token.is_empty() || query_id.is_empty() {
-                *state.flex_status.lock() = "Set Flex token and Query ID first.".into();
-            } else {
-                fetch_and_process(&state, &token, &query_id);
+        // Guard: if any operation panics, log it and keep the loop alive.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if state.flex_request.swap(false, Ordering::Relaxed) {
+                let (token, query_id) = {
+                    let cfg = state.flex_config.lock();
+                    (cfg.token.clone(), cfg.query_id.clone())
+                };
+                if token.is_empty() || query_id.is_empty() {
+                    *state.flex_status.lock() = "Set Flex token and Query ID first.".into();
+                } else {
+                    fetch_and_process(&state, &token, &query_id);
+                }
             }
-        }
 
-        if state.perf_recompute.swap(false, Ordering::Relaxed) {
-            recompute(&state);
-        }
+            if state.perf_recompute.swap(false, Ordering::Relaxed) {
+                recompute(&state);
+            }
 
-        if state.export_pdf.swap(false, Ordering::Relaxed) {
-            export_pdf(&state);
+            if state.export_pdf.swap(false, Ordering::Relaxed) {
+                export_pdf(&state);
+            }
+        }));
+
+        if result.is_err() {
+            state.log(LogLevel::Err, "Perf worker recovered from an internal error.");
         }
 
         thread::sleep(Duration::from_millis(300));
@@ -142,14 +149,32 @@ pub fn recompute(state: &SharedState) {
         return;
     }
 
+    // Step 1: compute analytics (pure math, can't fail).
     let rts = crate::analytics::build_round_trips(&trades, &sectors);
     let metrics = crate::analytics::compute_metrics(&rts, &nav, &cashflows);
-    let charts = crate::charts::render_all(&nav, &rts, &metrics, show_returns);
 
-    *state.round_trips.lock() = rts;
-    *state.metrics.lock() = Some(metrics);
-    *state.perf_charts.lock() = charts;
+    // Store analytics immediately so the UI gets trade list + metrics
+    // even if chart rendering fails below.
+    state.log(
+        LogLevel::Ok,
+        format!("Analytics: {} round trips, {:.2}% return", rts.len(), metrics.total_return),
+    );
+    *state.round_trips.lock() = rts.clone();
+    *state.metrics.lock() = Some(metrics.clone());
     state.perf_gen.fetch_add(1, Ordering::Relaxed);
+
+    // Step 2: render charts (plotters — may panic on systems without fonts).
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::charts::render_all(&nav, &rts, &metrics, show_returns)
+    })) {
+        Ok(charts) => {
+            *state.perf_charts.lock() = charts;
+            state.perf_gen.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(_) => {
+            state.log(LogLevel::Warn, "Chart rendering failed (font or graphics issue on this system).");
+        }
+    }
 }
 
 fn export_pdf(state: &SharedState) {
