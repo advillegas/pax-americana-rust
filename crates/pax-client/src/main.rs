@@ -290,7 +290,7 @@ fn main() {
                     entry_label: format!("Entry {ep:.2}"),
                     exit_label: format!("Exit {xp:.2}"),
                 });
-                state.chart_tf.store(3, std::sync::atomic::Ordering::Relaxed);
+                state.chart_tf.store(6, std::sync::atomic::Ordering::Relaxed); // D1
                 state.chart_request.store(true, std::sync::atomic::Ordering::Relaxed);
                 if let Some(ui) = w.upgrade() {
                     ui.set_chart_symbol(sym.into());

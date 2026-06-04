@@ -393,7 +393,7 @@ impl SharedState {
             data_connected: AtomicBool::new(false),
             portfolio: Mutex::new(Vec::new()),
             chart_symbol: Mutex::new(String::new()),
-            chart_tf: AtomicU8::new(3), // 6M default
+            chart_tf: AtomicU8::new(6), // D1 default
             chart_request: AtomicBool::new(false),
             chart: Mutex::new(ChartView::default()),
             chart_bars: Mutex::new(Vec::new()),

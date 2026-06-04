@@ -479,16 +479,20 @@ export component ClientWindow inherits Window {
             spacing: 8px;
 
             HorizontalLayout {
-                spacing: 8px;
-                Text { text: "Symbol"; color: #909fb7; width: 60px; vertical-alignment: center; }
-                LineField { value <=> root.chart_symbol; width: 120px; }
-                PaxButton { label: "LOAD"; width: 80px; clicked => { root.load_chart(); } }
-                Rectangle { width: 12px; }
-                Segment { label: "1D"; active: root.chart_tf == 0; width: 48px; clicked => { root.chart_tf = 0; root.load_chart(); } }
-                Segment { label: "1W"; active: root.chart_tf == 1; width: 48px; clicked => { root.chart_tf = 1; root.load_chart(); } }
-                Segment { label: "1M"; active: root.chart_tf == 2; width: 48px; clicked => { root.chart_tf = 2; root.load_chart(); } }
-                Segment { label: "6M"; active: root.chart_tf == 3; width: 48px; clicked => { root.chart_tf = 3; root.load_chart(); } }
-                Segment { label: "1Y"; active: root.chart_tf == 4; width: 48px; clicked => { root.chart_tf = 4; root.load_chart(); } }
+                spacing: 6px;
+                Text { text: "Symbol"; color: #909fb7; width: 52px; vertical-alignment: center; }
+                LineField { value <=> root.chart_symbol; width: 100px; }
+                PaxButton { label: "LOAD"; width: 64px; clicked => { root.load_chart(); } }
+                Rectangle { width: 4px; }
+                Segment { label: "M1";  active: root.chart_tf == 0; width: 38px; clicked => { root.chart_tf = 0; root.load_chart(); } }
+                Segment { label: "M5";  active: root.chart_tf == 1; width: 38px; clicked => { root.chart_tf = 1; root.load_chart(); } }
+                Segment { label: "M15"; active: root.chart_tf == 2; width: 42px; clicked => { root.chart_tf = 2; root.load_chart(); } }
+                Segment { label: "M30"; active: root.chart_tf == 3; width: 42px; clicked => { root.chart_tf = 3; root.load_chart(); } }
+                Segment { label: "H1";  active: root.chart_tf == 4; width: 36px; clicked => { root.chart_tf = 4; root.load_chart(); } }
+                Segment { label: "H4";  active: root.chart_tf == 5; width: 36px; clicked => { root.chart_tf = 5; root.load_chart(); } }
+                Segment { label: "D1";  active: root.chart_tf == 6; width: 36px; clicked => { root.chart_tf = 6; root.load_chart(); } }
+                Segment { label: "W1";  active: root.chart_tf == 7; width: 36px; clicked => { root.chart_tf = 7; root.load_chart(); } }
+                Segment { label: "MN";  active: root.chart_tf == 8; width: 38px; clicked => { root.chart_tf = 8; root.load_chart(); } }
                 Rectangle { }
             }
             Text { text: root.chart_status; color: #909fb7; font-size: 12px; }

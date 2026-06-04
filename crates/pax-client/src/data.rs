@@ -142,14 +142,31 @@ fn data_main(_cfg: ClientConfig, state: Arc<SharedState>) {
     }
 }
 
-/// Timeframe → (bar size, lookback duration, label).
+/// Timeframe index → (bar size, lookback duration, label).
+///
+/// The lookback for each bar size is set to the maximum IB allows while
+/// keeping the response size reasonable.
+///   M1  = 1-min bars,  1 trading day
+///   M5  = 5-min bars,  5 trading days
+///   M15 = 15-min bars, 10 trading days
+///   M30 = 30-min bars, 1 month
+///   H1  = 1-hour bars, 2 months
+///   H4  = 4-hour bars, 6 months
+///   D1  = daily bars,  1 year
+///   W1  = weekly bars, 5 years
+///   MN  = monthly bars, 10 years
 fn timeframe(tf: u8) -> (BarSize, HDuration, &'static str) {
     match tf {
-        0 => (BarSize::Min5, HDuration::days(1), "1D"),
-        1 => (BarSize::Min30, HDuration::days(5), "1W"),
-        2 => (BarSize::Day, HDuration::months(1), "1M"),
-        4 => (BarSize::Day, HDuration::years(1), "1Y"),
-        _ => (BarSize::Day, HDuration::months(6), "6M"),
+        0 => (BarSize::Min,   HDuration::days(1),    "M1"),
+        1 => (BarSize::Min5,  HDuration::days(5),    "M5"),
+        2 => (BarSize::Min15, HDuration::days(10),   "M15"),
+        3 => (BarSize::Min30, HDuration::months(1),  "M30"),
+        4 => (BarSize::Hour,  HDuration::months(2),  "H1"),
+        5 => (BarSize::Hour4, HDuration::months(6),  "H4"),
+        6 => (BarSize::Day,   HDuration::years(1),   "D1"),
+        7 => (BarSize::Week,  HDuration::years(5),   "W1"),
+        8 => (BarSize::Month, HDuration::years(10),  "MN"),
+        _ => (BarSize::Day,   HDuration::years(1),   "D1"),
     }
 }
 
