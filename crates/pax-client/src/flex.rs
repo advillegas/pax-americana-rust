@@ -83,13 +83,13 @@ fn fetch_and_process(state: &SharedState, token: &str, query_id: &str) -> bool {
     *state.flex_status.lock() = "Sending request to IBKR…".into();
     state.log(LogLevel::Info, "Flex: sending request…");
 
-    // SendRequest with auto-retry on transient IBKR errors (rate limit, busy).
-    // IBKR limits to 10 requests/min/token and statement generation can take time.
-    const RETRY_DELAYS: [u64; 6] = [0, 30, 60, 60, 90, 120];
+    // SendRequest with a single retry after 60s. IBKR limits to 10 req/min/token;
+    // if the first two attempts fail, back off and let the user (or hourly timer) retry later.
+    const RETRY_DELAYS: [u64; 2] = [0, 60];
     let ref_code = 'send: {
-        for (retry, &delay) in RETRY_DELAYS.iter().enumerate() {
+        for (_retry, &delay) in RETRY_DELAYS.iter().enumerate() {
             if delay > 0 {
-                *state.flex_status.lock() = format!("IBKR busy — waiting {delay}s then retry {retry}/{}…", RETRY_DELAYS.len() - 1);
+                *state.flex_status.lock() = format!("IBKR busy — waiting {delay}s then retrying…");
                 thread::sleep(Duration::from_secs(delay));
             }
 
