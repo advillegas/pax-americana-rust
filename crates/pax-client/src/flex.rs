@@ -57,28 +57,43 @@ fn fetch_and_process(state: &SharedState, token: &str, query_id: &str) {
     *state.flex_status.lock() = "Sending request to IBKR…".into();
     state.log(LogLevel::Info, "Flex: sending request…");
 
-    let url = format!("{SEND_URL}?t={token}&q={query_id}&v=3");
-    let body = match ureq::get(&url).call() {
-        Ok(resp) => match resp.into_string() {
-            Ok(s) => s,
-            Err(e) => {
-                set_err(state, &format!("Read error: {e}"));
+    // SendRequest with auto-retry on transient IBKR errors (rate limit, busy).
+    let ref_code = 'send: {
+        for retry in 0..5 {
+            if retry > 0 {
+                let wait = 10 + retry * 5;
+                *state.flex_status.lock() = format!("IBKR busy — retrying in {wait}s (attempt {})…", retry + 1);
+                thread::sleep(Duration::from_secs(wait as u64));
+            }
+
+            let url = format!("{SEND_URL}?t={token}&q={query_id}&v=3");
+            let body = match ureq::get(&url).call() {
+                Ok(resp) => match resp.into_string() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        set_err(state, &format!("Read error: {e}"));
+                        return;
+                    }
+                },
+                Err(e) => {
+                    set_err(state, &format!("HTTP error: {e}"));
+                    return;
+                }
+            };
+
+            if let Some(c) = extract_tag(&body, "ReferenceCode") {
+                break 'send c;
+            }
+            let msg = extract_tag(&body, "ErrorMessage").unwrap_or_default();
+            let transient = msg.contains("try again") || msg.contains("could not be generated")
+                || msg.contains("heavy load");
+            if !transient {
+                set_err(state, &format!("Flex request failed: {msg}"));
                 return;
             }
-        },
-        Err(e) => {
-            set_err(state, &format!("HTTP error: {e}"));
-            return;
         }
-    };
-
-    let ref_code = match extract_tag(&body, "ReferenceCode") {
-        Some(c) => c,
-        None => {
-            let msg = extract_tag(&body, "ErrorMessage").unwrap_or_else(|| "Unknown error".into());
-            set_err(state, &format!("Flex request failed: {msg}"));
-            return;
-        }
+        set_err(state, "IBKR unavailable after 5 retries. Try again in a few minutes.");
+        return;
     };
 
     *state.flex_status.lock() = format!("Statement generating (ref {ref_code})…");
@@ -127,6 +142,7 @@ fn fetch_and_process(state: &SharedState, token: &str, query_id: &str) {
         Ok((trades, nav, cashflows)) => {
             let nt = trades.len();
             let nn = nav.len();
+            save_cache(&trades, &nav, &cashflows);
             *state.flex_trades.lock() = trades;
             *state.nav_history.lock() = nav;
             *state.cashflows.lock() = cashflows;
@@ -222,4 +238,129 @@ fn extract_tag(xml: &str, tag: &str) -> Option<String> {
     let start = xml.find(&open)? + open.len();
     let end = xml[start..].find(&close)?;
     Some(xml[start..start + end].trim().to_string())
+}
+
+// ── Flex data cache (survives restarts) ──────────────────────────────────────
+
+use serde::{Deserialize, Serialize};
+
+const CACHE_FILE: &str = "fd.dat";
+
+#[derive(Serialize, Deserialize)]
+struct FlexCache {
+    trades: Vec<CachedTrade>,
+    nav: Vec<CachedNav>,
+    cashflows: Vec<CachedCashflow>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CachedTrade {
+    dt: String,
+    sym: String,
+    side: String,
+    qty: f64,
+    px: f64,
+    proceeds: f64,
+    comm: f64,
+    rpnl: f64,
+    cat: String,
+    ccy: String,
+    desc: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CachedNav {
+    date: String,
+    nav: f64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CachedCashflow {
+    date: String,
+    amount: f64,
+}
+
+fn save_cache(
+    trades: &[crate::state::FlexTrade],
+    nav: &[crate::state::NavPoint],
+    cashflows: &[crate::state::Cashflow],
+) {
+    let c = FlexCache {
+        trades: trades
+            .iter()
+            .map(|t| CachedTrade {
+                dt: t.date_time.clone(),
+                sym: t.symbol.clone(),
+                side: t.side.clone(),
+                qty: t.quantity,
+                px: t.price,
+                proceeds: t.proceeds,
+                comm: t.commission,
+                rpnl: t.realized_pnl,
+                cat: t.asset_category.clone(),
+                ccy: t.currency.clone(),
+                desc: t.description.clone(),
+            })
+            .collect(),
+        nav: nav.iter().map(|n| CachedNav { date: n.date.clone(), nav: n.nav }).collect(),
+        cashflows: cashflows
+            .iter()
+            .map(|c| CachedCashflow { date: c.date.clone(), amount: c.amount })
+            .collect(),
+    };
+    if let Ok(bytes) = serde_json::to_vec(&c) {
+        crate::appdata::write(CACHE_FILE, bytes);
+    }
+}
+
+/// Load cached Flex data from disk (if any) and run analytics. Called once at startup
+/// so the Trades + Perf tabs are populated immediately without re-fetching from IBKR.
+pub fn load_cache_into(state: &SharedState) {
+    let bytes = match crate::appdata::read(CACHE_FILE) {
+        Some(b) => b,
+        None => return,
+    };
+    let c: FlexCache = match serde_json::from_slice(&bytes) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let trades: Vec<crate::state::FlexTrade> = c
+        .trades
+        .into_iter()
+        .map(|t| crate::state::FlexTrade {
+            date_time: t.dt,
+            symbol: t.sym,
+            side: t.side,
+            quantity: t.qty,
+            price: t.px,
+            proceeds: t.proceeds,
+            commission: t.comm,
+            realized_pnl: t.rpnl,
+            asset_category: t.cat,
+            currency: t.ccy,
+            description: t.desc,
+            sector: String::new(),
+        })
+        .collect();
+    let nav: Vec<crate::state::NavPoint> =
+        c.nav.into_iter().map(|n| crate::state::NavPoint { date: n.date, nav: n.nav }).collect();
+    let cashflows: Vec<crate::state::Cashflow> = c
+        .cashflows
+        .into_iter()
+        .map(|c| crate::state::Cashflow { date: c.date, amount: c.amount })
+        .collect();
+
+    let nt = trades.len();
+    let nn = nav.len();
+    if nt == 0 && nn == 0 {
+        return;
+    }
+
+    *state.flex_trades.lock() = trades;
+    *state.nav_history.lock() = nav;
+    *state.cashflows.lock() = cashflows;
+    *state.flex_status.lock() = format!("Cached: {nt} trades, {nn} NAV points. Click FETCH to refresh.");
+    state.log(LogLevel::Info, format!("Loaded cached Flex data: {nt} trades, {nn} NAV pts."));
+    recompute(state);
 }

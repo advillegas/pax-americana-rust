@@ -65,12 +65,14 @@ fn main() {
     spawn_update_check(state.clone());
     spawn_detect_accounts(state.clone());
 
-    // Load persisted flex config + sector cache.
+    // Load persisted flex config + sector cache + cached Flex data.
     {
         let fc = persist::load_flex();
         *state.flex_config.lock() = fc;
         *state.sectors.lock() = sectors::load_cache();
     }
+    // Restore cached Flex trade/NAV data so Trades + Perf tabs populate immediately.
+    flex::load_cache_into(&state);
 
     let ui = ClientWindow::new().expect("failed to create window");
 
