@@ -58,12 +58,13 @@ fn fetch_and_process(state: &SharedState, token: &str, query_id: &str) {
     state.log(LogLevel::Info, "Flex: sending request…");
 
     // SendRequest with auto-retry on transient IBKR errors (rate limit, busy).
+    // IBKR limits to 10 requests/min/token and statement generation can take time.
+    const RETRY_DELAYS: [u64; 6] = [0, 30, 60, 60, 90, 120];
     let ref_code = 'send: {
-        for retry in 0..5 {
-            if retry > 0 {
-                let wait = 10 + retry * 5;
-                *state.flex_status.lock() = format!("IBKR busy — retrying in {wait}s (attempt {})…", retry + 1);
-                thread::sleep(Duration::from_secs(wait as u64));
+        for (retry, &delay) in RETRY_DELAYS.iter().enumerate() {
+            if delay > 0 {
+                *state.flex_status.lock() = format!("IBKR busy — waiting {delay}s then retry {retry}/{}…", RETRY_DELAYS.len() - 1);
+                thread::sleep(Duration::from_secs(delay));
             }
 
             let url = format!("{SEND_URL}?t={token}&q={query_id}&v=3");
@@ -86,13 +87,13 @@ fn fetch_and_process(state: &SharedState, token: &str, query_id: &str) {
             }
             let msg = extract_tag(&body, "ErrorMessage").unwrap_or_default();
             let transient = msg.contains("try again") || msg.contains("could not be generated")
-                || msg.contains("heavy load");
+                || msg.contains("heavy load") || msg.contains("Too many");
             if !transient {
-                set_err(state, &format!("Flex request failed: {msg}"));
+                set_err(state, &format!("Flex: {msg}"));
                 return;
             }
         }
-        set_err(state, "IBKR unavailable after 5 retries. Try again in a few minutes.");
+        set_err(state, "IBKR unavailable after retries. Wait 5 min, then FETCH again.");
         return;
     };
 
