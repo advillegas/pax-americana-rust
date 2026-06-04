@@ -277,8 +277,9 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         let client_balance = margin.net_liq;
         let max_dd = state.controls.lock().max_drawdown_pct;
         // SMA < 0 is a Reg-T / Fed call — block ALL opening regardless of buying power.
-        // Otherwise each opening order is gated by an exact what-if margin check below.
-        let sma_call = margin.sma < 0.0;
+        // Paper accounts can report bogus SMA values, so only enforce on live.
+        let is_paper = state.controls.lock().account_mode == crate::state::AccountMode::Paper;
+        let sma_call = !is_paper && margin.sma < 0.0;
         // Live buying power for THIS cycle. Each opening order decrements it by its
         // what-if initial-margin requirement, so cumulative opens can't over-commit.
         let mut projected_available = margin.available_funds;
