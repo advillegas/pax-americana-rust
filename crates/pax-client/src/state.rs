@@ -404,6 +404,8 @@ pub struct SharedState {
     pub perf_recompute: AtomicBool,
     pub export_pdf: AtomicBool,
     pub export_status: Mutex<String>,
+    /// Unix timestamp (secs) for a scheduled Flex retry after a transient IBKR error. 0 = none.
+    pub flex_retry_at: AtomicU64,
 }
 
 impl SharedState {
@@ -445,6 +447,7 @@ impl SharedState {
             perf_recompute: AtomicBool::new(false),
             export_pdf: AtomicBool::new(false),
             export_status: Mutex::new(String::new()),
+            flex_retry_at: AtomicU64::new(0),
         })
     }
 

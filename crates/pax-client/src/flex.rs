@@ -34,6 +34,22 @@ fn worker_loop(state: Arc<SharedState>) {
                 }
             }
 
+            // Delayed retry after a transient IBKR error (5-minute backoff).
+            let retry_at = state.flex_retry_at.load(Ordering::Relaxed);
+            if retry_at > 0 {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                if now >= retry_at {
+                    state.flex_retry_at.store(0, Ordering::Relaxed);
+                    state.log(LogLevel::Info, "Flex: auto-retrying after transient error…");
+                    if try_fetch(&state) {
+                        last_fetch = Instant::now();
+                    }
+                }
+            }
+
             // Hourly auto-refresh (only if token + query are configured).
             if last_fetch.elapsed() >= Duration::from_secs(AUTO_REFRESH_SECS) {
                 let has_config = {
@@ -103,6 +119,22 @@ fn fetch_and_process(state: &SharedState, token: &str, query_id: &str) -> bool {
             let code = extract_tag(&body, "ErrorCode").unwrap_or_default();
             let msg = extract_tag(&body, "ErrorMessage")
                 .unwrap_or_else(|| format!("Unexpected response (no ReferenceCode). Raw: {snippet}"));
+            let transient = code == "1001" || code == "1003" || code == "1009"
+                || msg.contains("try again") || msg.contains("could not be generated");
+            if transient {
+                *state.flex_status.lock() = format!("IBKR busy (error {code}) — will auto-retry in 5 min.");
+                state.log(LogLevel::Warn, format!("Flex: IBKR error {code}, will retry in 5 min."));
+                // Schedule a quiet retry via the auto-refresh mechanism.
+                state.flex_retry_at.store(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0)
+                        + 300,
+                    Ordering::Relaxed,
+                );
+                return false;
+            }
             set_err(state, &format!("IBKR error {code}: {msg}"));
             return false;
         }
