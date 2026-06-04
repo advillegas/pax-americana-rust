@@ -120,6 +120,8 @@ pub struct Status {
     pub master_positions: usize,
     pub client_positions: usize,
     pub drawdown_hit: bool,
+    /// True after CLOSE ALL flattened the book: trading is halted (armed) until START.
+    pub halted: bool,
     pub last_sync: String,
     pub orders_placed: u64,
     pub orders_closed: u64,
@@ -221,6 +223,9 @@ pub struct ChartView {
 pub struct SharedState {
     pub running: AtomicBool,
     pub close_all: AtomicBool,
+    /// Set when CLOSE ALL has flattened the book; the engine then halts trading until the
+    /// operator presses START again (which clears it). Stays connected/streaming meanwhile.
+    pub halted: AtomicBool,
     pub controls: Mutex<Controls>,
     pub status: Mutex<Status>,
     pub log: Mutex<LogBuffer>,
@@ -262,6 +267,7 @@ impl SharedState {
         Arc::new(SharedState {
             running: AtomicBool::new(false),
             close_all: AtomicBool::new(false),
+            halted: AtomicBool::new(false),
             controls: Mutex::new(Controls::default()),
             status: Mutex::new(Status::default()),
             log: Mutex::new(LogBuffer::default()),
@@ -296,14 +302,17 @@ impl SharedState {
         f(&mut s);
     }
 
-    /// Start the engine (used by both the native GUI and the web panel).
+    /// Start the engine (used by both the native GUI and the web panel). Clears any
+    /// CLOSE ALL halt so trading re-arms.
     pub fn start_engine(&self) {
         self.with_status(|s| {
             s.orders_placed = 0;
             s.orders_closed = 0;
             s.orders_failed = 0;
             s.drawdown_hit = false;
+            s.halted = false;
         });
+        self.halted.store(false, Ordering::Relaxed);
         self.running.store(true, Ordering::Relaxed);
         self.log(LogLevel::Info, "START — engine starting.");
     }

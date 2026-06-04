@@ -29,6 +29,11 @@ use crate::state::{AccountMode, ExecutionMode, LogLevel, SharedState, TradeMode}
 const REJECT_BACKOFF_SECS: u64 = 60;
 /// Throttle repeated identical IBKR notice codes to at most once per this interval.
 const NOTICE_THROTTLE_SECS: u64 = 30;
+/// How long a just-placed market order's quantity is folded into the client's effective
+/// position (covering the fill → position-feed propagation gap) before it expires. Must
+/// exceed typical fill+propagation latency; over-counting within it only ever suppresses
+/// duplicate orders (the safe direction).
+const PENDING_TTL: Duration = Duration::from_secs(12);
 
 pub fn spawn(cfg: ClientConfig, state: Arc<SharedState>) {
     thread::spawn(move || engine_main(cfg, state));
@@ -166,6 +171,13 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
     // IBKR notice code → last log time, to throttle repeated identical notices.
     let mut notice_log: HashMap<i32, Instant> = HashMap::new();
     let mut drawdown_hit = false;
+    // M1: running peak equity (high-water mark) for a true max-drawdown control.
+    let mut peak_balance = baseline;
+    // H2: net signed quantity of market orders placed recently, per symbol, with the time
+    // of the last placement. Folded into the client's effective position until it expires
+    // (PENDING_TTL) so a fill that hasn't propagated into the position feed yet is never
+    // double-ordered.
+    let mut pending: HashMap<String, (f64, Instant)> = HashMap::new();
     let mut last_unreachable_warn: Option<Instant> = None;
     let mut last_margin_warn: Option<Instant> = None;
     let mut last_offhours_log: Option<Instant> = None;
@@ -273,12 +285,33 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         }
 
         // ── one-shot Close All request ───────────────────────────────────────
+        // Flatten the book, then HALT trading (armed) so the engine does not immediately
+        // re-open to match the master. The operator presses START to clear the halt.
         if state.close_all.swap(false, Ordering::Relaxed) {
             do_close_all(&client, state, &account);
+            // Forget any pending/locked state so a resume re-derives cleanly from the master.
+            pending.clear();
+            state.halted.store(true, Ordering::Relaxed);
+            state.with_status(|s| s.halted = true);
+            state.log(LogLevel::Warn, "CLOSE ALL complete — trading HALTED. Press START to resume.");
         }
 
-        // ── balance + margin/SMA + drawdown guards ───────────────────────────
-        let margin = ib::read_margin(&client, &account).unwrap_or_default();
+        // ── balance + margin + drawdown guards ───────────────────────────────
+        // A failed margin/balance read must NOT proceed with zeroed values (that would
+        // read as "balances unknown" and block with a misleading reason). Skip the cycle
+        // with a clear, throttled message and retry.
+        let margin = match ib::read_margin(&client, &account) {
+            Ok(m) => m,
+            Err(e) => {
+                let warn = last_margin_warn.map(|t| t.elapsed() > Duration::from_secs(30)).unwrap_or(true);
+                if warn {
+                    state.log(LogLevel::Warn, format!("Margin/balance read failed: {e} — skipping cycle, will retry."));
+                    last_margin_warn = Some(Instant::now());
+                }
+                sleep_running(cfg.sync_interval_secs, state);
+                continue;
+            }
+        };
         let client_balance = margin.net_liq;
         let max_dd = state.controls.lock().max_drawdown_pct;
         // Universal "no capacity to open" signal that works across Reg-T, Portfolio
@@ -302,8 +335,11 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
                 last_margin_warn = Some(Instant::now());
             }
         }
-        if baseline > 0.0 && client_balance > 0.0 {
-            let dd = (baseline - client_balance) / baseline * 100.0;
+        // Max drawdown is measured from the running PEAK equity (high-water mark), not the
+        // session-start balance, so a profitable run doesn't loosen the guard.
+        if client_balance > 0.0 {
+            peak_balance = peak_balance.max(client_balance);
+            let dd = if peak_balance > 0.0 { (peak_balance - client_balance) / peak_balance * 100.0 } else { 0.0 };
             if dd >= max_dd && !drawdown_hit {
                 drawdown_hit = true;
                 state.log(
@@ -331,9 +367,17 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             s.cushion = margin.cushion;
             s.sma = margin.sma;
             s.margin_blocks_opens = opens_blocked;
+            s.halted = state.halted.load(Ordering::Relaxed);
         });
 
         if drawdown_hit {
+            sleep_running(cfg.sync_interval_secs, state);
+            continue;
+        }
+
+        // CLOSE ALL halt: stay connected and keep status/positions live, but place no
+        // orders until the operator presses START (which clears the halt).
+        if state.halted.load(Ordering::Relaxed) {
             sleep_running(cfg.sync_interval_secs, state);
             continue;
         }
@@ -530,7 +574,46 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         // net won't market-fill what a resting limit order will cover; protective orders
         // ride alongside their position. Market orders here only correct genuine drift.
         let master_eff = effective_positions(&snap.positions, &snap.working_orders);
-        let client_eff = effective_positions(&client_positions, desired);
+        let mut client_eff = effective_positions(&client_positions, desired);
+
+        // H2: fold the net of recently-placed market orders into the client's effective
+        // position. This closes the window where an order has filled but IBKR's position
+        // feed hasn't updated yet — without it the engine would recompute "still under
+        // target" and fire a duplicate, overshooting. Entries expire after PENDING_TTL by
+        // which the feed has caught up; transient over-counting only suppresses duplicates.
+        pending.retain(|_, (_, t)| t.elapsed() < PENDING_TTL);
+        for (sym, (q, _)) in &pending {
+            if let Some(p) = client_eff.iter_mut().find(|p| &p.symbol == sym) {
+                p.net_qty += *q;
+            } else {
+                client_eff.push(pax_core::Position::new(sym.clone(), *q));
+            }
+        }
+
+        // L1: apply the CURRENT risk caps (Max Pos $ / Qty) to the locked targets every
+        // cycle, so tightening a cap mid-session takes effect immediately rather than only
+        // on the master's next change. Stable when caps are unchanged (no churn).
+        let mut active_targets = locked_targets.clone();
+        if controls.max_position_qty > 0.0 || controls.max_position_notional > 0.0 {
+            let price_of: BTreeMap<&str, f64> =
+                snap.positions.iter().map(|p| (p.symbol.as_str(), p.avg_cost)).collect();
+            for (sym, t) in active_targets.iter_mut() {
+                if controls.max_position_qty > 0.0 && t.abs() > controls.max_position_qty {
+                    *t = controls.max_position_qty * t.signum();
+                }
+                if controls.max_position_notional > 0.0 {
+                    if let Some(px) = price_of.get(sym.as_str()) {
+                        if *px > 0.0 {
+                            let cap = (controls.max_position_notional / px).floor();
+                            if t.abs() > cap {
+                                *t = cap * t.signum();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let input = ReconcileInput {
             master: &master_eff,
             client: &client_eff,
@@ -539,8 +622,9 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             long_only,
             split_zero_cross: true,
             empty_master_guard: 2,
-            // Locked, balance-stable targets: resize only when the master's ledger changes.
-            targets: Some(&locked_targets),
+            // Locked, balance-stable targets (with live caps applied): resize only when the
+            // master's ledger changes or a cap tightens.
+            targets: Some(&active_targets),
         };
         let result = reconcile(&input);
 
@@ -608,6 +692,15 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
                     Ok(id) => {
                         placed_orders.insert(id, (intent.symbol.clone(), intent.side));
                         cooldown.insert(intent.symbol.clone(), Instant::now());
+                        // H2: record the signed quantity so subsequent cycles count this
+                        // order as already in-flight until the fill propagates (PENDING_TTL).
+                        let signed = match intent.side {
+                            Side::Buy => intent.qty,
+                            Side::Sell => -intent.qty,
+                        };
+                        let e = pending.entry(intent.symbol.clone()).or_insert((0.0, Instant::now()));
+                        e.0 += signed;
+                        e.1 = Instant::now();
                         let lvl = match intent.side {
                             Side::Buy => LogLevel::Buy,
                             Side::Sell => LogLevel::Sell,

@@ -236,11 +236,13 @@ fn main() {
             let Some(ui) = w.upgrade() else { return };
             let s = state.status.lock().clone();
             let running = state.is_running();
-            ui.set_connected(s.connected && !s.drawdown_hit);
+            ui.set_connected(s.connected && !s.drawdown_hit && !s.halted);
             ui.set_running(running);
             ui.set_status_text(
                 if s.drawdown_hit {
                     "⚠ DRAWDOWN HALT".to_string()
+                } else if s.halted {
+                    "■ HALTED — CLOSE ALL done; press START to resume".to_string()
                 } else if s.connected && s.master_connected {
                     "● CONNECTED - syncing".to_string()
                 } else if s.connected {
