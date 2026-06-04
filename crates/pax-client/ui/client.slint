@@ -767,11 +767,17 @@ export component ClientWindow inherits Window {
                 border-radius: 8px;
                 border-width: 1px;
                 border-color: #222d40;
-                if root.trades.length == 0 : Text {
-                    x: 12px; y: 12px;
-                    text: "No trades loaded. Enter your IBKR Flex token and Query ID, then click FETCH.";
-                    color: #5a6880;
-                    font-size: 12px;
+                if root.trades.length == 0 : VerticalLayout {
+                    padding: 12px;
+                    spacing: 4px;
+                    Text { text: "No trades loaded. To get started:"; color: #909fb7; font-size: 12px; font-weight: 700; }
+                    Text { text: "1. Log in to IBKR Account Management (portal.interactivebrokers.com)"; color: #5a6880; font-size: 11px; }
+                    Text { text: "2. Go to Performance & Reports → Flex Queries"; color: #5a6880; font-size: 11px; }
+                    Text { text: "3. Click '+' to create a new Activity Flex Query"; color: #5a6880; font-size: 11px; }
+                    Text { text: "4. Include these sections: Trades, Cash Transactions, Equity Summary"; color: #5a6880; font-size: 11px; }
+                    Text { text: "5. Set format to XML, save. Note the Query ID shown in the list."; color: #5a6880; font-size: 11px; }
+                    Text { text: "6. Go to Settings → Flex Web Service and generate a token."; color: #5a6880; font-size: 11px; }
+                    Text { text: "7. Enter both above and click FETCH."; color: #5a6880; font-size: 11px; }
                 }
                 ListView {
                     for r[i] in root.trades : Rectangle {
@@ -814,7 +820,20 @@ export component ClientWindow inherits Window {
             Text { text: root.perf_summary; color: #5a6880; font-size: 12px; }
             Text { text: root.export_status; color: #909fb7; font-size: 11px; }
 
+            // Include/exclude toggles (outside scroll so always visible).
+            HorizontalLayout {
+                spacing: 8px;
+                Segment { label: root.show_equity ? "☑ Equity" : "☐ Equity"; active: root.show_equity; width: 84px; clicked => { root.show_equity = !root.show_equity; } }
+                Segment { label: root.show_drawdown ? "☑ DD" : "☐ DD"; active: root.show_drawdown; width: 60px; clicked => { root.show_drawdown = !root.show_drawdown; } }
+                Segment { label: root.show_histogram ? "☑ Hist" : "☐ Hist"; active: root.show_histogram; width: 72px; clicked => { root.show_histogram = !root.show_histogram; } }
+                Segment { label: root.show_pies ? "☑ Pies" : "☐ Pies"; active: root.show_pies; width: 72px; clicked => { root.show_pies = !root.show_pies; } }
+                Segment { label: root.show_symbol_bar ? "☑ Syms" : "☐ Syms"; active: root.show_symbol_bar; width: 72px; clicked => { root.show_symbol_bar = !root.show_symbol_bar; } }
+                Segment { label: root.show_monthly ? "☑ Month" : "☐ Month"; active: root.show_monthly; width: 80px; clicked => { root.show_monthly = !root.show_monthly; } }
+                Rectangle { }
+            }
+
             ScrollView {
+                vertical-stretch: 1;
                 VerticalLayout {
                     spacing: 8px;
 
@@ -830,19 +849,24 @@ export component ClientWindow inherits Window {
                         image-fit: contain;
                     }
 
+                    // Metrics grid (two columns side by side).
                     Rectangle {
+                        height: 280px;
                         background: #0d1420;
                         border-radius: 8px;
                         border-width: 1px;
                         border-color: #222d40;
-                        VerticalLayout {
-                            padding: 10px;
-                            spacing: 2px;
-                            Text { text: "METRICS"; color: #909fb7; font-size: 11px; font-weight: 700; }
-                            for m in root.perf_metrics : HorizontalLayout {
-                                height: 20px;
-                                Text { text: m.label; color: #909fb7; font-size: 12px; width: 180px; vertical-alignment: center; }
-                                Text { text: m.value; color: #e9f0fb; font-size: 12px; font-weight: 700; vertical-alignment: center; }
+                        clip: true;
+                        ScrollView {
+                            VerticalLayout {
+                                padding: 10px;
+                                spacing: 2px;
+                                Text { text: "METRICS"; color: #909fb7; font-size: 11px; font-weight: 700; }
+                                for m in root.perf_metrics : HorizontalLayout {
+                                    height: 20px;
+                                    Text { text: m.label; color: #909fb7; font-size: 12px; width: 180px; vertical-alignment: center; }
+                                    Text { text: m.value; color: #e9f0fb; font-size: 12px; font-weight: 700; vertical-alignment: center; }
+                                }
                             }
                         }
                     }
@@ -870,18 +894,6 @@ export component ClientWindow inherits Window {
                         source: root.monthly_img;
                         min-height: 200px;
                         image-fit: contain;
-                    }
-
-                    Text { text: "INCLUDE IN REPORT"; color: #909fb7; font-size: 11px; font-weight: 700; }
-                    HorizontalLayout {
-                        spacing: 8px;
-                        Segment { label: root.show_equity ? "☑ Equity" : "☐ Equity"; active: root.show_equity; width: 90px; clicked => { root.show_equity = !root.show_equity; } }
-                        Segment { label: root.show_drawdown ? "☑ DD" : "☐ DD"; active: root.show_drawdown; width: 70px; clicked => { root.show_drawdown = !root.show_drawdown; } }
-                        Segment { label: root.show_histogram ? "☑ Hist" : "☐ Hist"; active: root.show_histogram; width: 80px; clicked => { root.show_histogram = !root.show_histogram; } }
-                        Segment { label: root.show_pies ? "☑ Pies" : "☐ Pies"; active: root.show_pies; width: 80px; clicked => { root.show_pies = !root.show_pies; } }
-                        Segment { label: root.show_symbol_bar ? "☑ Syms" : "☐ Syms"; active: root.show_symbol_bar; width: 80px; clicked => { root.show_symbol_bar = !root.show_symbol_bar; } }
-                        Segment { label: root.show_monthly ? "☑ Month" : "☐ Month"; active: root.show_monthly; width: 80px; clicked => { root.show_monthly = !root.show_monthly; } }
-                        Rectangle { }
                     }
                 }
             }
