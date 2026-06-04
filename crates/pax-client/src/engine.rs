@@ -276,19 +276,23 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         let margin = ib::read_margin(&client, &account).unwrap_or_default();
         let client_balance = margin.net_liq;
         let max_dd = state.controls.lock().max_drawdown_pct;
-        // SMA < 0 is a Reg-T / Fed call — block ALL opening regardless of buying power.
-        // Paper accounts can report bogus SMA values, so only enforce on live.
-        let is_paper = state.controls.lock().account_mode == crate::state::AccountMode::Paper;
-        let sma_call = !is_paper && margin.sma < 0.0;
-        // Live buying power for THIS cycle. Each opening order decrements it by its
-        // what-if initial-margin requirement, so cumulative opens can't over-commit.
+        // Universal "no capacity to open" signal that works across Reg-T, Portfolio
+        // Margin, cash, AND paper accounts: IBKR-computed AvailableFunds (= equity −
+        // initial margin). Each opening order is additionally gated by an exact per-order
+        // what-if margin check below. SMA is a Reg-T-specific value that is unreliable on
+        // Portfolio Margin / paper accounts, so it is surfaced for information only and is
+        // never used to gate trading.
         let mut projected_available = margin.available_funds;
-        if sma_call {
+        let opens_blocked = margin.available_funds <= 0.0;
+        if opens_blocked {
             let warn = last_margin_warn.map(|t| t.elapsed() > Duration::from_secs(30)).unwrap_or(true);
             if warn {
                 state.log(
-                    LogLevel::Err,
-                    format!("SMA negative (${:.0}) — Reg-T call; opens blocked, closes allowed", margin.sma),
+                    LogLevel::Warn,
+                    format!(
+                        "Insufficient margin (available funds ${:.0}) — opens blocked, closes allowed",
+                        margin.available_funds
+                    ),
                 );
                 last_margin_warn = Some(Instant::now());
             }
@@ -321,7 +325,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             s.excess_liquidity = margin.excess_liquidity;
             s.cushion = margin.cushion;
             s.sma = margin.sma;
-            s.margin_blocks_opens = sma_call;
+            s.margin_blocks_opens = opens_blocked;
         });
 
         if drawdown_hit {
@@ -480,7 +484,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             if w.is_entry
                 && !open_allowed(
                     &client, state, &account, &w.symbol, &w.currency, &w.exchange, w.side, w.quantity, w.kind,
-                    w.limit_price, w.aux_price, sma_call, &mut projected_available,
+                    w.limit_price, w.aux_price, &mut projected_available,
                 )
             {
                 continue;
@@ -562,7 +566,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
                     && !open_allowed(
                         &client, state, &account, &intent.symbol, &intent.currency, &intent.exchange,
                         intent.side, intent.qty, intent.kind, intent.limit_price, intent.aux_price,
-                        sma_call, &mut projected_available,
+                        &mut projected_available,
                     )
                 {
                     continue;
@@ -728,9 +732,10 @@ fn is_opening(reason: IntentReason) -> bool {
 }
 
 /// Decide whether an opening order may be placed, using an exact IBKR what-if margin
-/// check. `projected_available` is this cycle's running buying power; on approval it is
-/// decremented by the order's initial-margin requirement so cumulative opens stay within
-/// buying power. SMA calls block all opens. If the what-if can't be evaluated, we defer
+/// check. `projected_available` is this cycle's running buying power (seeded from IBKR's
+/// AvailableFunds); on approval it is decremented by the order's initial-margin
+/// requirement so cumulative opens stay within buying power. This is account-type
+/// agnostic (Reg-T, Portfolio Margin, cash). If the what-if can't be evaluated, we defer
 /// to IBKR's own real-time rejection rather than falsely halting.
 #[allow(clippy::too_many_arguments)]
 fn open_allowed(
@@ -745,12 +750,8 @@ fn open_allowed(
     kind: pax_core::OrderKind,
     limit_price: f64,
     aux_price: f64,
-    sma_call: bool,
     projected_available: &mut f64,
 ) -> bool {
-    if sma_call {
-        return false;
-    }
     match ib::what_if_init_margin(client, account, symbol, currency, exchange, side, qty, kind, limit_price, aux_price) {
         Ok(init_margin) => {
             if *projected_available - init_margin < 0.0 {

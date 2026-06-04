@@ -167,15 +167,27 @@ impl WorkingOrder {
 
     /// Stable identity for matching a client mirror order to a desired order. Includes
     /// quantity and prices so a change in any of them triggers a replace.
+    ///
+    /// Only the price field(s) RELEVANT to the order kind are included: IBKR's open-order
+    /// read-back populates `limit_price` for stop orders inconsistently (it often echoes
+    /// the stop trigger), so keying on an irrelevant price field made the desired and the
+    /// live order keys never match — causing the mirror to cancel and re-place on every
+    /// cycle. Prices are rounded to cents to absorb tick rounding from the read-back.
     pub fn key(&self) -> String {
+        let (lmt, aux) = match self.kind {
+            OrderKind::Market => (0.0, 0.0),
+            OrderKind::Limit => (self.limit_price, 0.0),
+            OrderKind::Stop => (0.0, self.aux_price),
+            OrderKind::StopLimit => (self.limit_price, self.aux_price),
+        };
         format!(
-            "{}|{}|{}|{:.0}|{:.4}|{:.4}",
+            "{}|{}|{}|{:.0}|{:.2}|{:.2}",
             self.symbol,
             self.side.as_ib(),
             self.kind.as_ib(),
             self.quantity,
-            self.limit_price,
-            self.aux_price
+            lmt,
+            aux
         )
     }
 }
