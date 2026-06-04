@@ -16,6 +16,9 @@ parking_lot = { workspace = true }
 ureq = { workspace = true }
 ibapi = { workspace = true }
 slint = { version = "1.16", default-features = false, features = ["compat-1-2", "std", "backend-winit", "renderer-software"] }
+roxmltree = "0.20"
+plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "line_series", "area_series"] }
+printpdf = "0.5"
 
 [build-dependencies]
 slint-build = "1.16"

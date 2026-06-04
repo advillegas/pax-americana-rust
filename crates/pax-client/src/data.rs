@@ -225,8 +225,21 @@ pub fn rerender(state: &SharedState) {
     let avg = *state.chart_avg.lock();
     let symbol = state.chart_symbol.lock().clone();
     let label = state.chart_label.lock().clone();
-    let view = render_window(&bars[start..start + count], &symbol, &label, len, avg);
+    let markers = state.chart_markers.lock().clone();
+    let mut view = render_window(&bars[start..start + count], &symbol, &label, len, avg);
     drop(bars);
+
+    if let Some(m) = &markers {
+        let lo = view.min_val;
+        let hi = view.max_val;
+        let span = (hi - lo).max(1e-9);
+        let y_of = |p: f32| 100.0 - (p - lo) / span * 100.0;
+        view.has_trade_markers = true;
+        view.entry_marker_y = y_of(m.entry_price as f32);
+        view.exit_marker_y = y_of(m.exit_price as f32);
+        view.trade_entry_label = m.entry_label.clone();
+        view.trade_exit_label = m.exit_label.clone();
+    }
 
     *state.chart.lock() = view;
     state.chart_gen.fetch_add(1, Ordering::Relaxed);
@@ -286,6 +299,11 @@ fn render_window(slice: &[RawBar], symbol: &str, label: &str, total: usize, avg:
         avg_present: avg.is_some(),
         avg_y: avg.map(|a| y_of(a as f32)).unwrap_or(0.0),
         avg_label: avg.map(|a| format!("avg {a:.2}")).unwrap_or_default(),
+        has_trade_markers: false,
+        entry_marker_y: 0.0,
+        exit_marker_y: 0.0,
+        trade_entry_label: String::new(),
+        trade_exit_label: String::new(),
     }
 }
 

@@ -9,23 +9,31 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod analytics;
 mod appdata;
+mod charts;
 mod config;
 mod data;
 mod engine;
+mod flex;
+mod flexparse;
 mod ib;
 mod ledger;
 mod license;
 mod market_hours;
 mod master_api;
 mod persist;
+mod report;
+mod sectors;
 mod state;
 
 use std::os::windows::process::CommandExt;
 use std::time::Duration;
 
 use crate::config::ClientConfig;
-use crate::state::{AccountMode, ExecutionMode, LogLevel, SharedState, TradeMode};
+use crate::state::{
+    AccountMode, ChartImage, ExecutionMode, LogLevel, SharedState, TradeMarkers, TradeMode,
+};
 
 slint::include_modules!();
 
@@ -53,8 +61,16 @@ fn main() {
 
     engine::spawn(cfg.clone(), state.clone());
     data::spawn(cfg.clone(), state.clone());
+    flex::spawn(state.clone());
     spawn_update_check(state.clone());
     spawn_detect_accounts(state.clone());
+
+    // Load persisted flex config + sector cache.
+    {
+        let fc = persist::load_flex();
+        *state.flex_config.lock() = fc;
+        *state.sectors.lock() = sectors::load_cache();
+    }
 
     let ui = ClientWindow::new().expect("failed to create window");
 
@@ -72,6 +88,17 @@ fn main() {
         ui.set_live_port(c.ib_port_live.to_string().into());
         ui.set_paper_port(c.ib_port_paper.to_string().into());
         ui.set_account(c.ib_account.clone().into());
+    }
+    {
+        let fc = state.flex_config.lock();
+        ui.set_flex_token(fc.token.clone().into());
+        ui.set_flex_query_id(fc.query_id.clone().into());
+        ui.set_show_equity(fc.show_equity);
+        ui.set_show_drawdown(fc.show_drawdown);
+        ui.set_show_histogram(fc.show_histogram);
+        ui.set_show_pies(fc.show_pies);
+        ui.set_show_symbol_bar(fc.show_symbol_bar);
+        ui.set_show_monthly(fc.show_monthly);
     }
 
     {
@@ -129,6 +156,7 @@ fn main() {
         ui.on_load_chart(move || {
             if let Some(ui) = w.upgrade() {
                 *state.chart_symbol.lock() = ui.get_chart_symbol().trim().to_uppercase();
+                *state.chart_markers.lock() = None;
                 state.chart_tf.store(ui.get_chart_tf() as u8, std::sync::atomic::Ordering::Relaxed);
                 state.chart_request.store(true, std::sync::atomic::Ordering::Relaxed);
             }
@@ -225,6 +253,83 @@ fn main() {
         });
     }
 
+    // ── Flex / Trades / Performance callbacks ──────────────────────────────────
+    {
+        let state = state.clone();
+        let w = ui.as_weak();
+        ui.on_fetch_flex(move || {
+            if let Some(ui) = w.upgrade() {
+                let mut cfg = state.flex_config.lock();
+                cfg.token = ui.get_flex_token().trim().to_string();
+                cfg.query_id = ui.get_flex_query_id().trim().to_string();
+                cfg.show_equity = ui.get_show_equity();
+                cfg.show_drawdown = ui.get_show_drawdown();
+                cfg.show_histogram = ui.get_show_histogram();
+                cfg.show_pies = ui.get_show_pies();
+                cfg.show_symbol_bar = ui.get_show_symbol_bar();
+                cfg.show_monthly = ui.get_show_monthly();
+                persist::save_flex(&cfg);
+                state.flex_request.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let w = ui.as_weak();
+        ui.on_view_trade(move |idx| {
+            let rts = state.round_trips.lock();
+            if let Some(t) = rts.get(idx as usize) {
+                let sym = t.symbol.clone();
+                let ep = t.entry_price;
+                let xp = t.exit_price;
+                drop(rts);
+                *state.chart_symbol.lock() = sym.clone();
+                *state.chart_markers.lock() = Some(TradeMarkers {
+                    entry_price: ep,
+                    exit_price: xp,
+                    entry_label: format!("Entry {ep:.2}"),
+                    exit_label: format!("Exit {xp:.2}"),
+                });
+                state.chart_tf.store(3, std::sync::atomic::Ordering::Relaxed);
+                state.chart_request.store(true, std::sync::atomic::Ordering::Relaxed);
+                if let Some(ui) = w.upgrade() {
+                    ui.set_chart_symbol(sym.into());
+                    ui.set_active_tab(2);
+                }
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let w = ui.as_weak();
+        ui.on_recompute_perf(move || {
+            if let Some(ui) = w.upgrade() {
+                state.perf_curve_mode.store(
+                    ui.get_perf_curve_mode() as u8,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+            state.perf_recompute.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
+    {
+        let state = state.clone();
+        let w = ui.as_weak();
+        ui.on_export_pdf(move || {
+            if let Some(ui) = w.upgrade() {
+                let mut cfg = state.flex_config.lock();
+                cfg.show_equity = ui.get_show_equity();
+                cfg.show_drawdown = ui.get_show_drawdown();
+                cfg.show_histogram = ui.get_show_histogram();
+                cfg.show_pies = ui.get_show_pies();
+                cfg.show_symbol_bar = ui.get_show_symbol_bar();
+                cfg.show_monthly = ui.get_show_monthly();
+                persist::save_flex(&cfg);
+            }
+            state.export_pdf.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
+
     let timer = slint::Timer::default();
     {
         let state = state.clone();
@@ -232,6 +337,7 @@ fn main() {
         let mut last_accounts: Vec<String> = Vec::new();
         let mut last_port_sig = String::new();
         let mut last_chart_gen: u64 = 0;
+        let mut last_perf_gen: u64 = 0;
         timer.start(slint::TimerMode::Repeated, Duration::from_millis(500), move || {
             let Some(ui) = w.upgrade() else { return };
             let s = state.status.lock().clone();
@@ -322,6 +428,17 @@ fn main() {
                 }
             }
 
+            // ── Flex status + perf data ────────────────────────────────────────
+            ui.set_flex_status(state.flex_status.lock().clone().into());
+            ui.set_export_status(state.export_status.lock().clone().into());
+            {
+                let gen = state.perf_gen.load(std::sync::atomic::Ordering::Relaxed);
+                if gen != last_perf_gen {
+                    last_perf_gen = gen;
+                    push_perf(&ui, &state);
+                }
+            }
+
             // Refresh the account picker when the detected list changes.
             let detected = state.detected_accounts.lock().clone();
             if detected != last_accounts {
@@ -367,6 +484,117 @@ fn push_chart(ui: &ClientWindow, state: &SharedState) {
     ui.set_avg_present(c.avg_present);
     ui.set_avg_y(c.avg_y);
     ui.set_avg_label(c.avg_label.into());
+    ui.set_has_trade_markers(c.has_trade_markers);
+    ui.set_entry_marker_y(c.entry_marker_y);
+    ui.set_exit_marker_y(c.exit_marker_y);
+    ui.set_trade_entry_label(c.trade_entry_label.into());
+    ui.set_trade_exit_label(c.trade_exit_label.into());
+}
+
+fn rgb_to_slint(img: &ChartImage) -> slint::Image {
+    if img.rgb.is_empty() || img.w == 0 || img.h == 0 {
+        return slint::Image::default();
+    }
+    let buf =
+        slint::SharedPixelBuffer::<slint::Rgb8Pixel>::clone_from_slice(&img.rgb, img.w, img.h);
+    slint::Image::from_rgb8(buf)
+}
+
+fn push_perf(ui: &ClientWindow, state: &SharedState) {
+    // Metrics
+    if let Some(m) = state.metrics.lock().clone() {
+        let rows: Vec<MetricRow> = [
+            ("Total Return", format!("{:.2}%", m.total_return)),
+            ("CAGR", format!("{:.2}%", m.cagr)),
+            ("Volatility", format!("{:.2}%", m.volatility)),
+            ("Sharpe Ratio", format!("{:.2}", m.sharpe)),
+            ("Sortino Ratio", format!("{:.2}", m.sortino)),
+            ("Calmar Ratio", format!("{:.2}", m.calmar)),
+            ("Max Drawdown", format!("{:.2}%", m.max_drawdown)),
+            ("Max DD Duration", format!("{} days", m.max_dd_duration_days)),
+            ("Total Trades", format!("{}", m.total_trades)),
+            ("Win Rate", format!("{:.1}%", m.win_rate)),
+            ("Profit Factor", format!("{:.2}", m.profit_factor)),
+            ("Avg Win", money(m.avg_win)),
+            ("Avg Loss", money(m.avg_loss)),
+            ("Payoff Ratio", format!("{:.2}", m.payoff_ratio)),
+            ("Expectancy", money(m.expectancy)),
+            ("Best Trade", money(m.best_trade)),
+            ("Worst Trade", money(m.worst_trade)),
+            ("Avg Holding", format!("{:.1} days", m.avg_holding_days)),
+            ("Commission", money(m.total_commission)),
+            ("Long P&L", money(m.long_pnl)),
+            ("Short P&L", money(m.short_pnl)),
+            ("Total P&L", money(m.total_pnl)),
+        ]
+        .into_iter()
+        .map(|(l, v)| MetricRow { label: l.into(), value: v.into() })
+        .collect();
+        ui.set_perf_metrics(std::rc::Rc::new(slint::VecModel::from(rows)).into());
+        ui.set_perf_summary(
+            format!(
+                "Return: {:.2}% | Sharpe: {:.2} | Max DD: {:.2}% | {} trades",
+                m.total_return, m.sharpe, m.max_drawdown, m.total_trades
+            )
+            .into(),
+        );
+    }
+
+    // Chart images
+    let charts = state.perf_charts.lock().clone();
+    if let Some(img) = &charts.equity {
+        ui.set_equity_img(rgb_to_slint(img));
+    }
+    if let Some(img) = &charts.drawdown {
+        ui.set_drawdown_img(rgb_to_slint(img));
+    }
+    if let Some(img) = &charts.histogram {
+        ui.set_histogram_img(rgb_to_slint(img));
+    }
+    if let Some(img) = &charts.pie_side {
+        ui.set_pie_side_img(rgb_to_slint(img));
+    }
+    if let Some(img) = &charts.pie_sector {
+        ui.set_pie_sector_img(rgb_to_slint(img));
+    }
+    if let Some(img) = &charts.pie_winloss {
+        ui.set_pie_winloss_img(rgb_to_slint(img));
+    }
+    if let Some(img) = &charts.symbol_bar {
+        ui.set_symbol_bar_img(rgb_to_slint(img));
+    }
+    if let Some(img) = &charts.monthly {
+        ui.set_monthly_img(rgb_to_slint(img));
+    }
+
+    // Trade list
+    let rts = state.round_trips.lock().clone();
+    let model: Vec<TradeRow> = rts
+        .iter()
+        .map(|t| TradeRow {
+            date: fmt_date(&t.exit_time).into(),
+            symbol: t.symbol.as_str().into(),
+            side: t.side.as_str().into(),
+            qty: format!("{:.0}", t.qty).into(),
+            entry: format!("{:.2}", t.entry_price).into(),
+            exit_p: format!("{:.2}", t.exit_price).into(),
+            pnl: money(t.pnl).into(),
+            ret: format!("{:.1}%", t.return_pct).into(),
+            sector: t.sector.as_str().into(),
+            up: t.pnl >= 0.0,
+        })
+        .collect();
+    ui.set_trades(std::rc::Rc::new(slint::VecModel::from(model)).into());
+    ui.set_trades_summary(format!("{} round-trip trades", rts.len()).into());
+}
+
+fn fmt_date(s: &str) -> String {
+    let s = s.replace('-', "");
+    if s.len() >= 8 {
+        format!("{}-{}-{}", &s[0..4], &s[4..6], &s[6..8])
+    } else {
+        s
+    }
 }
 
 fn apply_settings(ui: &ClientWindow, state: &SharedState) {

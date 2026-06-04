@@ -8,7 +8,7 @@ use std::fs;
 use serde::{Deserialize, Serialize};
 
 use crate::appdata;
-use crate::state::{AccountMode, Controls, ExecutionMode, TradeMode};
+use crate::state::{AccountMode, Controls, ExecutionMode, FlexConfig, TradeMode};
 
 const FILE: &str = "st.dat";
 const LEGACY: &str = "pax-client.settings.json";
@@ -84,5 +84,21 @@ pub fn save(c: &Controls) {
     };
     if let Ok(bytes) = serde_json::to_vec(&ps) {
         appdata::write(FILE, bytes);
+    }
+}
+
+// ── Flex / performance config (separate hidden file) ─────────────────────────
+
+const FLEX_FILE: &str = "fx.dat";
+
+pub fn load_flex() -> FlexConfig {
+    appdata::read(FLEX_FILE)
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_flex(cfg: &FlexConfig) {
+    if let Ok(bytes) = serde_json::to_vec(cfg) {
+        appdata::write(FLEX_FILE, bytes);
     }
 }
