@@ -30,10 +30,18 @@ pub fn parse(xml: &str) -> Result<(Vec<FlexTrade>, Vec<NavPoint>, Vec<Cashflow>)
                     trades.push(t);
                 }
             }
-            "EquitySummaryByReportDateInBase" if node.is_element() => {
+            "EquitySummaryByReportDateInBase" | "EquitySummaryInBase" if node.is_element() => {
                 let date = attr(&node, "reportDate");
                 let total = attr_f64(&node, "total");
-                if !date.is_empty() && total > 0.0 {
+                if total <= 0.0 || date.is_empty() {
+                    continue;
+                }
+                nav.push(NavPoint { date, nav: total });
+            }
+            "ChangeInNAV" if node.is_element() => {
+                let date = attr(&node, "reportDate");
+                let total = attr_f64(&node, "endingValue");
+                if total > 0.0 && !date.is_empty() {
                     nav.push(NavPoint { date, nav: total });
                 }
             }

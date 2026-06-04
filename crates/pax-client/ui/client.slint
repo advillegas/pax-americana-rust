@@ -774,10 +774,15 @@ export component ClientWindow inherits Window {
                     Text { text: "1. Log in to IBKR Account Management (portal.interactivebrokers.com)"; color: #5a6880; font-size: 11px; }
                     Text { text: "2. Go to Performance & Reports → Flex Queries"; color: #5a6880; font-size: 11px; }
                     Text { text: "3. Click '+' to create a new Activity Flex Query"; color: #5a6880; font-size: 11px; }
-                    Text { text: "4. Include these sections: Trades, Cash Transactions, Equity Summary"; color: #5a6880; font-size: 11px; }
-                    Text { text: "5. Set format to XML, save. Note the Query ID shown in the list."; color: #5a6880; font-size: 11px; }
-                    Text { text: "6. Go to Settings → Flex Web Service and generate a token."; color: #5a6880; font-size: 11px; }
-                    Text { text: "7. Enter both above and click FETCH."; color: #5a6880; font-size: 11px; }
+                    Text { text: "4. Include these sections (check each, select ALL fields inside):"; color: #e9f0fb; font-size: 11px; font-weight: 700; }
+                    Text { text: "    • Trades  (under Transaction Activity)"; color: #34d399; font-size: 11px; }
+                    Text { text: "    • Net Asset Value  (trade-date or settlement-date — gives daily NAV)"; color: #34d399; font-size: 11px; }
+                    Text { text: "    • Cash Transactions  (deposits/withdrawals for accurate returns)"; color: #34d399; font-size: 11px; }
+                    Text { text: "    • Change in Position Values  (optional — additional P&L detail)"; color: #5a6880; font-size: 11px; }
+                    Text { text: "5. Set Period to 'Last 365 Calendar Days' (or longer). Format: XML."; color: #5a6880; font-size: 11px; }
+                    Text { text: "6. Save. Note the Query ID shown in the Flex Queries list."; color: #5a6880; font-size: 11px; }
+                    Text { text: "7. Go to Settings → Flex Web Service. Click 'Generate' to get a token."; color: #5a6880; font-size: 11px; }
+                    Text { text: "8. Paste the Token and Query ID above, then click FETCH."; color: #5a6880; font-size: 11px; }
                 }
                 ListView {
                     for r[i] in root.trades : Rectangle {
