@@ -18,8 +18,10 @@ use ibapi::contracts::Contract;
 use ibapi::market_data::historical::{BarSize, Duration as HDuration, WhatToShow};
 use ibapi::market_data::TradingHours;
 
+use pax_core::OrderKind;
+
 use crate::config::{stable_client_id, ClientConfig};
-use crate::state::{AccountMode, Candle, ChartView, LogLevel, PortfolioRow, RawBar, SharedState};
+use crate::state::{AccountMode, Candle, ChartView, LogLevel, PortfolioRow, PositionOverlay, RawBar, SharedState};
 
 pub fn spawn(cfg: ClientConfig, state: Arc<SharedState>) {
     thread::spawn(move || data_main(cfg, state));
@@ -124,10 +126,9 @@ fn data_main(_cfg: ClientConfig, state: Arc<SharedState>) {
                 let tf = state.chart_tf.load(Ordering::Relaxed);
                 let sym = symbol.trim().to_string();
                 if !sym.is_empty() {
-                    // Chart the open-position average cost if we hold the symbol.
-                    let avg = book.get(&sym).map(|r| r.avg_cost).filter(|c| *c > 0.0);
+                    let overlay = build_overlay(&client, &book, &account, &sym);
                     state.chart.lock().status = format!("Loading {sym}…");
-                    load_into_state(&client, &state, &sym, tf, avg);
+                    load_into_state(&client, &state, &sym, tf, overlay);
                 }
             }
 
@@ -176,9 +177,9 @@ const DEFAULT_VISIBLE: usize = 90;
 const MIN_VISIBLE: usize = 8;
 
 /// Fetch bars for `symbol`, store the full set in shared state, reset the view window to
-/// the most-recent `DEFAULT_VISIBLE` bars, then render. `avg` (open-position average cost)
-/// is charted as a horizontal line and folded into the price range.
-fn load_into_state(client: &Client, state: &SharedState, symbol: &str, tf: u8, avg: Option<f64>) {
+/// the most-recent `DEFAULT_VISIBLE` bars, then render. The `overlay` carries the open
+/// position's avg cost, direction, stop loss, and take profit for chart annotation.
+fn load_into_state(client: &Client, state: &SharedState, symbol: &str, tf: u8, overlay: PositionOverlay) {
     let (bar_size, duration, label) = timeframe(tf);
     let contract = Contract::stock(symbol).on_exchange("SMART").in_currency("USD").build();
 
@@ -216,7 +217,7 @@ fn load_into_state(client: &Client, state: &SharedState, symbol: &str, tf: u8, a
     let count = len.min(DEFAULT_VISIBLE).max(MIN_VISIBLE.min(len));
 
     *state.chart_bars.lock() = raw;
-    *state.chart_avg.lock() = avg;
+    *state.chart_overlay.lock() = overlay;
     *state.chart_symbol.lock() = symbol.to_string();
     *state.chart_label.lock() = label.to_string();
     state.chart_count.store(count, Ordering::Relaxed);
@@ -239,11 +240,11 @@ pub fn rerender(state: &SharedState) {
     state.chart_count.store(count, Ordering::Relaxed);
     state.chart_start.store(start, Ordering::Relaxed);
 
-    let avg = *state.chart_avg.lock();
+    let overlay = state.chart_overlay.lock().clone();
     let symbol = state.chart_symbol.lock().clone();
     let label = state.chart_label.lock().clone();
     let markers = state.chart_markers.lock().clone();
-    let mut view = render_window(&bars[start..start + count], &symbol, &label, len, avg);
+    let mut view = render_window(&bars[start..start + count], &symbol, &label, len, &overlay);
     drop(bars);
 
     if let Some(m) = &markers {
@@ -263,17 +264,26 @@ pub fn rerender(state: &SharedState) {
 }
 
 /// Build a `ChartView` for a slice of bars. The price range is taken from the *visible*
-/// slice (so zooming/panning rescales the y-axis), plus the avg line when present.
-fn render_window(slice: &[RawBar], symbol: &str, label: &str, total: usize, avg: Option<f64>) -> ChartView {
+/// slice (so zooming/panning rescales the y-axis), expanded to include the overlay prices.
+fn render_window(slice: &[RawBar], symbol: &str, label: &str, total: usize, overlay: &PositionOverlay) -> ChartView {
     if slice.is_empty() {
         return ChartView { symbol: symbol.to_string(), status: format!("{symbol}: no data"), ..Default::default() };
     }
 
     let mut lo = slice.iter().map(|b| b.l).fold(f32::INFINITY, f32::min);
     let mut hi = slice.iter().map(|b| b.h).fold(f32::NEG_INFINITY, f32::max);
-    if let Some(a) = avg {
-        lo = lo.min(a as f32);
-        hi = hi.max(a as f32);
+    // Expand price range to include overlay levels so they're always visible.
+    if overlay.qty.abs() > 0.0 && overlay.avg_cost > 0.0 {
+        lo = lo.min(overlay.avg_cost as f32);
+        hi = hi.max(overlay.avg_cost as f32);
+    }
+    if let Some(sp) = overlay.stop_price {
+        lo = lo.min(sp as f32);
+        hi = hi.max(sp as f32);
+    }
+    if let Some(tp) = overlay.tp_price {
+        lo = lo.min(tp as f32);
+        hi = hi.max(tp as f32);
     }
     let span = (hi - lo).max(1e-9);
     let y_of = |p: f32| 100.0 - (p - lo) / span * 100.0;
@@ -285,7 +295,7 @@ fn render_window(slice: &[RawBar], symbol: &str, label: &str, total: usize, avg:
         .iter()
         .enumerate()
         .map(|(i, b)| {
-            let top = b.o.max(b.c); // higher price → smaller y
+            let top = b.o.max(b.c);
             let bot = b.o.min(b.c);
             Candle {
                 cx: (i as f32 + 0.5) * slot,
@@ -303,6 +313,8 @@ fn render_window(slice: &[RawBar], symbol: &str, label: &str, total: usize, avg:
     let last = slice[n - 1].c;
     let chg_pct = if first.abs() > 1e-9 { (last - first) / first * 100.0 } else { 0.0 };
 
+    let has_pos = overlay.qty.abs() > 0.0 && overlay.avg_cost > 0.0;
+
     ChartView {
         symbol: symbol.to_string(),
         status: format!("{symbol} · {label} · {n}/{total} bars  (drag/scroll to pan, =/- to zoom)"),
@@ -313,15 +325,86 @@ fn render_window(slice: &[RawBar], symbol: &str, label: &str, total: usize, avg:
         max_label: format!("{hi:.2}"),
         last_label: format!("{last:.2}  ({chg_pct:+.2}%)"),
         up: last >= first,
-        avg_present: avg.is_some(),
-        avg_y: avg.map(|a| y_of(a as f32)).unwrap_or(0.0),
-        avg_label: avg.map(|a| format!("avg {a:.2}")).unwrap_or_default(),
+        // Position overlay
+        pos_present: has_pos,
+        pos_label: if has_pos {
+            let dir = if overlay.is_long { "LONG" } else { "SHORT" };
+            format!("{dir} {:.0}", overlay.qty.abs())
+        } else {
+            String::new()
+        },
+        pos_long: overlay.is_long,
+        entry_y: if has_pos { y_of(overlay.avg_cost as f32) } else { 0.0 },
+        entry_label: if has_pos { format!("Entry {:.2}", overlay.avg_cost) } else { String::new() },
+        sl_present: overlay.stop_price.is_some(),
+        sl_y: overlay.stop_price.map(|p| y_of(p as f32)).unwrap_or(0.0),
+        sl_label: overlay.stop_label.clone(),
+        tp_present: overlay.tp_price.is_some(),
+        tp_y: overlay.tp_price.map(|p| y_of(p as f32)).unwrap_or(0.0),
+        tp_label: overlay.tp_label.clone(),
+        // Trade markers (filled by rerender's caller)
         has_trade_markers: false,
         entry_marker_y: 0.0,
         exit_marker_y: 0.0,
         trade_entry_label: String::new(),
         trade_exit_label: String::new(),
     }
+}
+
+/// Build the position overlay for a symbol: avg cost, direction, and any resting
+/// stop-loss / take-profit orders. A stop that would close a long position is a SL;
+/// a limit that would close it is a TP. Vice versa for shorts.
+fn build_overlay(
+    client: &Client,
+    book: &BTreeMap<String, PortfolioRow>,
+    account: &str,
+    symbol: &str,
+) -> PositionOverlay {
+    let row = match book.get(symbol) {
+        Some(r) if r.position.abs() > 0.0 => r,
+        _ => return PositionOverlay::default(),
+    };
+
+    let is_long = row.position > 0.0;
+    let mut overlay = PositionOverlay {
+        qty: row.position,
+        avg_cost: row.avg_cost,
+        is_long,
+        ..Default::default()
+    };
+
+    // Look up resting orders on this symbol to identify SL and TP.
+    if let Ok(orders) = crate::ib::read_open_orders(client, account) {
+        for (_id, wo) in &orders {
+            if wo.symbol != symbol {
+                continue;
+            }
+            // A protective order closes the position: opposite side to the position.
+            let closes = (is_long && wo.side == pax_core::Side::Sell)
+                || (!is_long && wo.side == pax_core::Side::Buy);
+            if !closes {
+                continue;
+            }
+            match wo.kind {
+                OrderKind::Stop | OrderKind::StopLimit => {
+                    let price = if wo.aux_price > 0.0 { wo.aux_price } else { wo.limit_price };
+                    if price > 0.0 {
+                        overlay.stop_price = Some(price);
+                        overlay.stop_label = format!("SL {price:.2}");
+                    }
+                }
+                OrderKind::Limit => {
+                    if wo.limit_price > 0.0 {
+                        overlay.tp_price = Some(wo.limit_price);
+                        overlay.tp_label = format!("TP {:.2}", wo.limit_price);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    overlay
 }
 
 fn sleep(secs: u64) {

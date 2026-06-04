@@ -147,9 +147,18 @@ export component ClientWindow inherits Window {
     in property <string> chart_max;
     in property <string> chart_last;
     in property <bool> chart_up;
-    in property <bool> avg_present;
-    in property <float> avg_y;
-    in property <string> avg_label;
+    // Position overlay
+    in property <bool> pos_present;
+    in property <string> pos_label;
+    in property <bool> pos_long;
+    in property <float> entry_y;
+    in property <string> entry_label;
+    in property <bool> sl_present;
+    in property <float> sl_y;
+    in property <string> sl_label;
+    in property <bool> tp_present;
+    in property <float> tp_y;
+    in property <string> tp_label;
     in property <bool> has_trade_markers;
     in property <float> entry_marker_y;
     in property <float> exit_marker_y;
@@ -526,19 +535,68 @@ export component ClientWindow inherits Window {
                     property <float> cursor_price:
                         root.chart_max_val - (cross.mouse-y / self.height) * (root.chart_max_val - root.chart_min_val);
 
-                    // Average-cost line for the open position.
-                    if root.avg_present : Rectangle {
-                        x: 0;
-                        width: 100%;
-                        y: parent.height * (root.avg_y / 100) - 1px;
-                        height: 2px;
-                        background: #f5b454;
+                    // Position direction badge (top-right of plot).
+                    if root.pos_present : Rectangle {
+                        x: parent.width - self.width - 4px;
+                        y: 4px;
+                        width: 100px;
+                        height: 20px;
+                        border-radius: 4px;
+                        background: root.pos_long ? #34d39930 : #fb5d6e30;
+                        Text {
+                            text: root.pos_label;
+                            color: root.pos_long ? #34d399 : #fb5d6e;
+                            font-size: 11px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
                     }
-                    if root.avg_present : Text {
+
+                    // Entry line (avg cost) — green for long, red for short.
+                    if root.pos_present : Rectangle {
+                        x: 0; width: 100%;
+                        y: parent.height * (root.entry_y / 100) - 1px;
+                        height: 2px;
+                        background: root.pos_long ? #34d399 : #fb5d6e;
+                    }
+                    if root.pos_present : Text {
                         x: 4px;
-                        y: parent.height * (root.avg_y / 100) - 14px;
-                        text: root.avg_label;
-                        color: #f5b454;
+                        y: parent.height * (root.entry_y / 100) - 14px;
+                        text: root.entry_label;
+                        color: root.pos_long ? #34d399 : #fb5d6e;
+                        font-size: 11px;
+                        font-weight: 700;
+                    }
+
+                    // Stop loss line — red dashed (rendered as thin dotted via multiple rects).
+                    if root.sl_present : Rectangle {
+                        x: 0; width: 100%;
+                        y: parent.height * (root.sl_y / 100) - 0.5px;
+                        height: 1px;
+                        background: #fb5d6e;
+                    }
+                    if root.sl_present : Text {
+                        x: 4px;
+                        y: parent.height * (root.sl_y / 100) + 2px;
+                        text: root.sl_label;
+                        color: #fb5d6e;
+                        font-size: 11px;
+                        font-weight: 700;
+                    }
+
+                    // Take profit line — blue.
+                    if root.tp_present : Rectangle {
+                        x: 0; width: 100%;
+                        y: parent.height * (root.tp_y / 100) - 0.5px;
+                        height: 1px;
+                        background: #3d8af7;
+                    }
+                    if root.tp_present : Text {
+                        x: 4px;
+                        y: parent.height * (root.tp_y / 100) + 2px;
+                        text: root.tp_label;
+                        color: #3d8af7;
                         font-size: 11px;
                         font-weight: 700;
                     }

@@ -275,6 +275,18 @@ pub struct PortfolioRow {
     pub unrealized_pnl: f64,
 }
 
+/// Position overlay info built by the data thread for the chart.
+#[derive(Default, Clone)]
+pub struct PositionOverlay {
+    pub qty: f64,
+    pub avg_cost: f64,
+    pub is_long: bool,
+    pub stop_price: Option<f64>,
+    pub tp_price: Option<f64>,
+    pub stop_label: String,
+    pub tp_label: String,
+}
+
 /// A raw OHLC bar as fetched from IB. The full set is kept so the GUI can pan/zoom
 /// (re-window) without re-querying historical data.
 #[derive(Default, Clone, Copy)]
@@ -311,10 +323,24 @@ pub struct ChartView {
     pub last_label: String,
     /// True when the period closed up.
     pub up: bool,
-    /// The open-position average cost, charted as a horizontal line when present.
-    pub avg_present: bool,
-    pub avg_y: f32,
-    pub avg_label: String,
+    // ── Position overlay: entry, stop loss, take profit ──
+    /// True when there is an open position on this symbol.
+    pub pos_present: bool,
+    /// "LONG 200" or "SHORT 50" etc.
+    pub pos_label: String,
+    /// True if position is long (for color coding).
+    pub pos_long: bool,
+    /// Entry line (average cost), normalized y (0..100).
+    pub entry_y: f32,
+    pub entry_label: String,
+    /// Stop loss line (resting stop order that would close position).
+    pub sl_present: bool,
+    pub sl_y: f32,
+    pub sl_label: String,
+    /// Take profit line (resting limit order that would close position).
+    pub tp_present: bool,
+    pub tp_y: f32,
+    pub tp_label: String,
     /// Trade entry/exit markers (shown when viewing a trade from the Trades tab).
     pub has_trade_markers: bool,
     pub entry_marker_y: f32,
@@ -348,8 +374,8 @@ pub struct SharedState {
     // ── Chart view window (pan / zoom over `chart_bars`) ──────────────────────
     /// The full set of bars for the loaded symbol (kept so pan/zoom can re-window).
     pub chart_bars: Mutex<Vec<RawBar>>,
-    /// Open-position average cost for the loaded symbol (charted as a line).
-    pub chart_avg: Mutex<Option<f64>>,
+    /// Position overlay for the loaded symbol (entry, SL, TP, direction).
+    pub chart_overlay: Mutex<PositionOverlay>,
     /// Timeframe label of the loaded data (e.g. "6M"), for the status line.
     pub chart_label: Mutex<String>,
     /// Number of visible bars (zoom level).
@@ -397,7 +423,7 @@ impl SharedState {
             chart_request: AtomicBool::new(false),
             chart: Mutex::new(ChartView::default()),
             chart_bars: Mutex::new(Vec::new()),
-            chart_avg: Mutex::new(None),
+            chart_overlay: Mutex::new(PositionOverlay::default()),
             chart_label: Mutex::new(String::new()),
             chart_count: AtomicUsize::new(90),
             chart_start: AtomicUsize::new(0),
