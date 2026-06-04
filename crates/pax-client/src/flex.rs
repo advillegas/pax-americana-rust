@@ -80,71 +80,52 @@ fn try_fetch(state: &SharedState) -> bool {
 }
 
 fn fetch_and_process(state: &SharedState, token: &str, query_id: &str) -> bool {
+    state.log(LogLevel::Info, format!("Flex: SendRequest (token={}…, query={query_id})", &token[..token.len().min(8)]));
     *state.flex_status.lock() = "Sending request to IBKR…".into();
-    state.log(LogLevel::Info, "Flex: sending request…");
 
-    // SendRequest with a single retry after 60s. IBKR limits to 10 req/min/token;
-    // if the first two attempts fail, back off and let the user (or hourly timer) retry later.
-    const RETRY_DELAYS: [u64; 2] = [0, 60];
-    let ref_code = 'send: {
-        for (_retry, &delay) in RETRY_DELAYS.iter().enumerate() {
-            if delay > 0 {
-                *state.flex_status.lock() = format!("IBKR busy — waiting {delay}s then retrying…");
-                thread::sleep(Duration::from_secs(delay));
-            }
-
-            let url = format!("{SEND_URL}?t={token}&q={query_id}&v=3");
-            let body = match ureq::get(&url).call() {
-                Ok(resp) => match resp.into_string() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        set_err(state, &format!("Read error: {e}"));
-                        return false;
-                    }
-                },
-                Err(e) => {
-                    set_err(state, &format!("HTTP error: {e}"));
-                    return false;
-                }
-            };
-
-            if let Some(c) = extract_tag(&body, "ReferenceCode") {
-                break 'send c;
-            }
-            let msg = extract_tag(&body, "ErrorMessage").unwrap_or_default();
-            let transient = msg.contains("try again") || msg.contains("could not be generated")
-                || msg.contains("heavy load") || msg.contains("Too many");
-            if !transient {
-                set_err(state, &format!("Flex: {msg}"));
-                return false;
-            }
+    // Step 1: SendRequest → get reference code.
+    let url = format!("{SEND_URL}?t={token}&q={query_id}&v=3");
+    let body = match http_get(&url) {
+        Ok(b) => b,
+        Err(e) => {
+            set_err(state, &format!("SendRequest failed: {e}"));
+            return false;
         }
-        set_err(state, "IBKR unavailable after retries. Wait 5 min, then FETCH again.");
-        return false;
     };
 
+    // Log the raw response (truncated) for diagnostics.
+    let snippet: String = body.chars().take(300).collect();
+    state.log(LogLevel::Info, format!("Flex SendRequest response: {snippet}"));
+
+    let ref_code = match extract_tag(&body, "ReferenceCode") {
+        Some(c) => c,
+        None => {
+            let code = extract_tag(&body, "ErrorCode").unwrap_or_default();
+            let msg = extract_tag(&body, "ErrorMessage")
+                .unwrap_or_else(|| format!("Unexpected response (no ReferenceCode). Raw: {snippet}"));
+            set_err(state, &format!("IBKR error {code}: {msg}"));
+            return false;
+        }
+    };
+
+    // Step 2: Poll GetStatement until the statement is ready.
     *state.flex_status.lock() = format!("Statement generating (ref {ref_code})…");
+    state.log(LogLevel::Info, format!("Flex: polling ref {ref_code}…"));
 
     let mut attempts = 0;
     let xml = loop {
         attempts += 1;
         if attempts > 30 {
-            set_err(state, "Flex statement timed out.");
+            set_err(state, "Flex: statement timed out after 60s of polling.");
             return false;
         }
         thread::sleep(Duration::from_secs(2));
 
         let url = format!("{GET_URL}?t={token}&q={ref_code}&v=3");
-        let body = match ureq::get(&url).call() {
-            Ok(r) => match r.into_string() {
-                Ok(s) => s,
-                Err(e) => {
-                    set_err(state, &format!("Read error: {e}"));
-                    return false;
-                }
-            },
+        let body = match http_get(&url) {
+            Ok(b) => b,
             Err(e) => {
-                set_err(state, &format!("HTTP error: {e}"));
+                set_err(state, &format!("GetStatement failed: {e}"));
                 return false;
             }
         };
@@ -152,13 +133,14 @@ fn fetch_and_process(state: &SharedState, token: &str, query_id: &str) -> bool {
         if body.contains("<FlexStatements") || body.contains("<FlexQueryResponse") {
             break body;
         }
-        if body.contains("Statement generation in progress") {
+        if body.contains("Statement generation in progress") || body.contains("1019") {
             *state.flex_status.lock() = format!("Generating… (attempt {attempts})");
             continue;
         }
-        if body.contains("<Status>Fail</Status>") {
-            let msg = extract_tag(&body, "ErrorMessage").unwrap_or_else(|| "Unknown".into());
-            set_err(state, &format!("Flex error: {msg}"));
+        let code = extract_tag(&body, "ErrorCode").unwrap_or_default();
+        let msg = extract_tag(&body, "ErrorMessage").unwrap_or_default();
+        if !msg.is_empty() {
+            set_err(state, &format!("IBKR poll error {code}: {msg}"));
             return false;
         }
     };
@@ -261,6 +243,23 @@ fn export_pdf(state: &SharedState) {
 fn set_err(state: &SharedState, msg: &str) {
     *state.flex_status.lock() = msg.to_string();
     state.log(LogLevel::Err, format!("Flex: {msg}"));
+}
+
+/// HTTP GET that returns the response body for BOTH success and error status codes.
+/// ureq 2.x treats 4xx/5xx as Err, but IBKR returns XML error bodies we need to parse.
+fn http_get(url: &str) -> Result<String, String> {
+    match ureq::get(url).call() {
+        Ok(resp) => resp.into_string().map_err(|e| format!("body read: {e}")),
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            if body.contains('<') {
+                Ok(body) // XML error response — let the caller parse it
+            } else {
+                Err(format!("HTTP {code}: {body}"))
+            }
+        }
+        Err(ureq::Error::Transport(t)) => Err(format!("connection: {t}")),
+    }
 }
 
 fn extract_tag(xml: &str, tag: &str) -> Option<String> {
