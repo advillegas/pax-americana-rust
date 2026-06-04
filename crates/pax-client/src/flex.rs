@@ -119,11 +119,13 @@ fn fetch_and_process(state: &SharedState, token: &str, query_id: &str) -> bool {
             let code = extract_tag(&body, "ErrorCode").unwrap_or_default();
             let msg = extract_tag(&body, "ErrorMessage")
                 .unwrap_or_else(|| format!("Unexpected response (no ReferenceCode). Raw: {snippet}"));
-            let transient = code == "1001" || code == "1003" || code == "1009"
+            let transient = code == "1001" || code == "1004" || code == "1005"
+                || code == "1006" || code == "1007" || code == "1008" || code == "1009"
+                || code == "1018" || code == "1019" || code == "1021"
                 || msg.contains("try again") || msg.contains("could not be generated");
             if transient {
-                *state.flex_status.lock() = format!("IBKR busy (error {code}) — will auto-retry in 5 min.");
-                state.log(LogLevel::Warn, format!("Flex: IBKR error {code}, will retry in 5 min."));
+                *state.flex_status.lock() = format!("IBKR error {code} — will auto-retry in 5 min. Try running query manually in IBKR portal.");
+                state.log(LogLevel::Warn, format!("Flex: IBKR error {code}. If persistent, verify query runs in IBKR portal."));
                 // Schedule a quiet retry via the auto-refresh mechanism.
                 state.flex_retry_at.store(
                     std::time::SystemTime::now()
@@ -279,13 +281,22 @@ fn set_err(state: &SharedState, msg: &str) {
 
 /// HTTP GET that returns the response body for BOTH success and error status codes.
 /// ureq 2.x treats 4xx/5xx as Err, but IBKR returns XML error bodies we need to parse.
+/// Sets a browser-like User-Agent since IBKR may reject default library agents.
 fn http_get(url: &str) -> Result<String, String> {
-    match ureq::get(url).call() {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(30))
+        .build();
+    match agent
+        .get(url)
+        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .set("Accept", "application/xml, text/xml, */*")
+        .call()
+    {
         Ok(resp) => resp.into_string().map_err(|e| format!("body read: {e}")),
         Err(ureq::Error::Status(code, resp)) => {
             let body = resp.into_string().unwrap_or_default();
             if body.contains('<') {
-                Ok(body) // XML error response — let the caller parse it
+                Ok(body)
             } else {
                 Err(format!("HTTP {code}: {body}"))
             }
