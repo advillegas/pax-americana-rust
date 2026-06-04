@@ -34,6 +34,12 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 fn main() {
     std::env::set_var("SLINT_BACKEND", "winit-software");
 
+    // Force an OPAQUE OS window (Slint defaults to a transparent winit surface, which with
+    // the software renderer's partial redraw can leave see-through artifacts on Windows).
+    let _ = slint::BackendSelector::new()
+        .with_winit_window_attributes_hook(|attrs| attrs.with_transparent(false))
+        .select();
+
     kill_other_instances();
     std::thread::sleep(Duration::from_millis(1500));
 

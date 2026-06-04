@@ -15,7 +15,7 @@ tracing-subscriber = { workspace = true }
 parking_lot = { workspace = true }
 ureq = { workspace = true }
 ibapi = { workspace = true }
-slint = { version = "1.16", default-features = false, features = ["compat-1-2", "std", "backend-winit", "renderer-software"] }
+slint = { version = "1.16", default-features = false, features = ["compat-1-2", "std", "backend-winit", "renderer-software", "unstable-winit-030"] }
 
 [build-dependencies]
 slint-build = "1.16"

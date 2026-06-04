@@ -27,6 +27,15 @@ fn main() {
     // CPU/software rendering — works without a GPU/OpenGL (RDP/VPS friendly).
     std::env::set_var("SLINT_BACKEND", "winit-software");
 
+    // Force an OPAQUE OS window. Slint's winit backend creates the window with
+    // `with_transparent(true)` by default; combined with the software renderer's partial
+    // (dirty-region) redraw, Windows can leave un-repainted areas showing through
+    // transparently — most visible on a mostly-static UI like this one. Selecting the
+    // backend with a non-transparent window attribute eliminates the see-through artifact.
+    let _ = slint::BackendSelector::new()
+        .with_winit_window_attributes_hook(|attrs| attrs.with_transparent(false))
+        .select();
+
     // Kill switch on launch: clear stale instances so they don't clog the port or hold
     // the TWS clientId. Wait long enough for the OS to release the socket + IB session.
     kill_other_instances();
