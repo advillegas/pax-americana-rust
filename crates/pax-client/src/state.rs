@@ -1,6 +1,5 @@
 //! Shared, thread-safe client state: GUI-set controls, engine-set status, and a log.
 
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -140,130 +139,6 @@ pub struct UpdateStatus {
     pub url: String,
 }
 
-// ── Flex / Performance data types ─────────────────────────────────────────────
-
-fn default_true() -> bool { true }
-
-#[derive(Default, Clone, Serialize, Deserialize)]
-pub struct FlexConfig {
-    pub token: String,
-    pub query_id: String,
-    #[serde(default = "default_true")]
-    pub show_equity: bool,
-    #[serde(default = "default_true")]
-    pub show_drawdown: bool,
-    #[serde(default = "default_true")]
-    pub show_histogram: bool,
-    #[serde(default = "default_true")]
-    pub show_pies: bool,
-    #[serde(default = "default_true")]
-    pub show_symbol_bar: bool,
-    #[serde(default = "default_true")]
-    pub show_monthly: bool,
-}
-
-#[derive(Default, Clone)]
-pub struct FlexTrade {
-    pub date_time: String,
-    pub symbol: String,
-    pub side: String,
-    pub quantity: f64,
-    pub price: f64,
-    pub proceeds: f64,
-    pub commission: f64,
-    pub realized_pnl: f64,
-    pub asset_category: String,
-    pub currency: String,
-    pub description: String,
-    pub sector: String,
-}
-
-#[derive(Default, Clone)]
-pub struct NavPoint {
-    pub date: String,
-    pub nav: f64,
-}
-
-#[derive(Default, Clone)]
-pub struct Cashflow {
-    pub date: String,
-    pub amount: f64,
-}
-
-#[derive(Default, Clone)]
-pub struct RoundTrip {
-    pub symbol: String,
-    pub side: String,
-    pub qty: f64,
-    pub entry_time: String,
-    pub exit_time: String,
-    pub entry_price: f64,
-    pub exit_price: f64,
-    pub pnl: f64,
-    pub return_pct: f64,
-    pub commission: f64,
-    pub holding_days: f64,
-    pub sector: String,
-}
-
-#[derive(Default, Clone)]
-pub struct Metrics {
-    pub total_return: f64,
-    pub cagr: f64,
-    pub volatility: f64,
-    pub sharpe: f64,
-    pub sortino: f64,
-    pub calmar: f64,
-    pub max_drawdown: f64,
-    pub max_dd_duration_days: u32,
-    pub win_rate: f64,
-    pub profit_factor: f64,
-    pub avg_win: f64,
-    pub avg_loss: f64,
-    pub expectancy: f64,
-    pub payoff_ratio: f64,
-    pub best_trade: f64,
-    pub worst_trade: f64,
-    pub avg_holding_days: f64,
-    pub total_trades: usize,
-    pub winners: usize,
-    pub losers: usize,
-    pub long_pnl: f64,
-    pub short_pnl: f64,
-    pub total_pnl: f64,
-    pub total_commission: f64,
-    pub per_symbol_pnl: BTreeMap<String, f64>,
-    pub per_sector_pnl: BTreeMap<String, f64>,
-    pub monthly_returns: Vec<(i32, u32, f64)>,
-}
-
-#[derive(Default, Clone)]
-pub struct ChartImage {
-    pub rgb: Vec<u8>,
-    pub w: u32,
-    pub h: u32,
-}
-
-#[derive(Default, Clone)]
-pub struct PerfCharts {
-    pub equity: Option<ChartImage>,
-    pub drawdown: Option<ChartImage>,
-    pub histogram: Option<ChartImage>,
-    pub pie_side: Option<ChartImage>,
-    pub pie_sector: Option<ChartImage>,
-    pub pie_winloss: Option<ChartImage>,
-    pub symbol_bar: Option<ChartImage>,
-    pub monthly: Option<ChartImage>,
-}
-
-#[derive(Default, Clone)]
-pub struct TradeMarkers {
-    pub entry_price: f64,
-    pub exit_price: f64,
-    pub entry_label: String,
-    pub exit_label: String,
-}
-
 /// A single live portfolio position (from the dedicated read-only data connection).
 #[derive(Default, Clone)]
 pub struct PortfolioRow {
@@ -341,12 +216,6 @@ pub struct ChartView {
     pub tp_present: bool,
     pub tp_y: f32,
     pub tp_label: String,
-    /// Trade entry/exit markers (shown when viewing a trade from the Trades tab).
-    pub has_trade_markers: bool,
-    pub entry_marker_y: f32,
-    pub exit_marker_y: f32,
-    pub trade_entry_label: String,
-    pub trade_exit_label: String,
 }
 
 pub struct SharedState {
@@ -386,26 +255,6 @@ pub struct SharedState {
     pub chart_anchor: AtomicUsize,
     /// Bumped whenever `chart` is re-rendered, so the GUI knows to push it.
     pub chart_gen: AtomicU64,
-    /// Trade entry/exit markers to overlay on the chart (set by view_trade callback).
-    pub chart_markers: Mutex<Option<TradeMarkers>>,
-    // ── Flex / Trades / Performance ───────────────────────────────────────────
-    pub flex_config: Mutex<FlexConfig>,
-    pub flex_status: Mutex<String>,
-    pub flex_request: AtomicBool,
-    pub flex_trades: Mutex<Vec<FlexTrade>>,
-    pub nav_history: Mutex<Vec<NavPoint>>,
-    pub cashflows: Mutex<Vec<Cashflow>>,
-    pub sectors: Mutex<BTreeMap<String, String>>,
-    pub round_trips: Mutex<Vec<RoundTrip>>,
-    pub metrics: Mutex<Option<Metrics>>,
-    pub perf_charts: Mutex<PerfCharts>,
-    pub perf_gen: AtomicU64,
-    pub perf_curve_mode: AtomicU8,
-    pub perf_recompute: AtomicBool,
-    pub export_pdf: AtomicBool,
-    pub export_status: Mutex<String>,
-    /// Unix timestamp (secs) for a scheduled Flex retry after a transient IBKR error. 0 = none.
-    pub flex_retry_at: AtomicU64,
 }
 
 impl SharedState {
@@ -431,23 +280,6 @@ impl SharedState {
             chart_start: AtomicUsize::new(0),
             chart_anchor: AtomicUsize::new(0),
             chart_gen: AtomicU64::new(0),
-            chart_markers: Mutex::new(None),
-            flex_config: Mutex::new(FlexConfig::default()),
-            flex_status: Mutex::new(String::new()),
-            flex_request: AtomicBool::new(false),
-            flex_trades: Mutex::new(Vec::new()),
-            nav_history: Mutex::new(Vec::new()),
-            cashflows: Mutex::new(Vec::new()),
-            sectors: Mutex::new(BTreeMap::new()),
-            round_trips: Mutex::new(Vec::new()),
-            metrics: Mutex::new(None),
-            perf_charts: Mutex::new(PerfCharts::default()),
-            perf_gen: AtomicU64::new(0),
-            perf_curve_mode: AtomicU8::new(0),
-            perf_recompute: AtomicBool::new(false),
-            export_pdf: AtomicBool::new(false),
-            export_status: Mutex::new(String::new()),
-            flex_retry_at: AtomicU64::new(0),
         })
     }
 

@@ -10,23 +10,6 @@ struct PortRow {
     up: bool,
 }
 
-struct TradeRow {
-    date: string,
-    symbol: string,
-    side: string,
-    qty: string,
-    entry: string,
-    exit_p: string,
-    pnl: string,
-    ret: string,
-    sector: string,
-    up: bool,
-}
-
-struct MetricRow {
-    label: string,
-    value: string,
-}
 
 struct Candle {
     cx: float,     // center x (0..100)
@@ -159,41 +142,6 @@ export component ClientWindow inherits Window {
     in property <bool> tp_present;
     in property <float> tp_y;
     in property <string> tp_label;
-    in property <bool> has_trade_markers;
-    in property <float> entry_marker_y;
-    in property <float> exit_marker_y;
-    in property <string> trade_entry_label;
-    in property <string> trade_exit_label;
-
-    // Flex
-    in-out property <string> flex_token;
-    in-out property <string> flex_query_id;
-    in property <string> flex_status;
-
-    // Trades
-    in property <[TradeRow]> trades;
-    in property <string> trades_summary;
-
-    // Performance
-    in-out property <int> perf_curve_mode;
-    in property <[MetricRow]> perf_metrics;
-    in property <image> equity_img;
-    in property <image> drawdown_img;
-    in property <image> histogram_img;
-    in property <image> pie_side_img;
-    in property <image> pie_sector_img;
-    in property <image> pie_winloss_img;
-    in property <image> symbol_bar_img;
-    in property <image> monthly_img;
-    in property <string> perf_summary;
-    in property <string> export_status;
-    in-out property <bool> show_equity: true;
-    in-out property <bool> show_drawdown: true;
-    in-out property <bool> show_histogram: true;
-    in-out property <bool> show_pies: true;
-    in-out property <bool> show_symbol_bar: true;
-    in-out property <bool> show_monthly: true;
-
     callback start();
     callback stop();
     callback close_all();
@@ -208,10 +156,6 @@ export component ClientWindow inherits Window {
     callback chart_drag_to(length, length); // (delta-x from press, plot width)
     callback chart_scroll(bool);            // true = forward in time
     callback chart_zoom(bool);              // true = zoom in
-    callback fetch_flex();
-    callback view_trade(int);
-    callback export_pdf();
-    callback recompute_perf();
 
     VerticalLayout {
         padding: 16px;
@@ -240,11 +184,9 @@ export component ClientWindow inherits Window {
         // ── Tab bar ──────────────────────────────────────────────────────────
         HorizontalLayout {
             spacing: 6px;
-            Segment { label: "Sync"; active: root.active_tab == 0; width: 80px; clicked => { root.active_tab = 0; } }
-            Segment { label: "Portfolio"; active: root.active_tab == 1; width: 90px; clicked => { root.active_tab = 1; } }
-            Segment { label: "Charts"; active: root.active_tab == 2; width: 80px; clicked => { root.active_tab = 2; } }
-            Segment { label: "Trades"; active: root.active_tab == 3; width: 80px; clicked => { root.active_tab = 3; } }
-            Segment { label: "Perf"; active: root.active_tab == 4; width: 70px; clicked => { root.active_tab = 4; } }
+            Segment { label: "Sync"; active: root.active_tab == 0; width: 110px; clicked => { root.active_tab = 0; } }
+            Segment { label: "Portfolio"; active: root.active_tab == 1; width: 110px; clicked => { root.active_tab = 1; } }
+            Segment { label: "Charts"; active: root.active_tab == 2; width: 110px; clicked => { root.active_tab = 2; } }
             Rectangle { }
         }
 
@@ -601,36 +543,6 @@ export component ClientWindow inherits Window {
                         font-weight: 700;
                     }
 
-                    // Trade entry/exit markers.
-                    if root.has_trade_markers : Rectangle {
-                        x: 0; width: 100%;
-                        y: parent.height * (root.entry_marker_y / 100) - 1px;
-                        height: 2px;
-                        background: #3d8af7;
-                    }
-                    if root.has_trade_markers : Text {
-                        x: 4px;
-                        y: parent.height * (root.entry_marker_y / 100) - 14px;
-                        text: root.trade_entry_label;
-                        color: #3d8af7;
-                        font-size: 11px;
-                        font-weight: 700;
-                    }
-                    if root.has_trade_markers : Rectangle {
-                        x: 0; width: 100%;
-                        y: parent.height * (root.exit_marker_y / 100) - 1px;
-                        height: 2px;
-                        background: #ff7849;
-                    }
-                    if root.has_trade_markers : Text {
-                        x: 4px;
-                        y: parent.height * (root.exit_marker_y / 100) + 2px;
-                        text: root.trade_exit_label;
-                        color: #ff7849;
-                        font-size: 11px;
-                        font-weight: 700;
-                    }
-
                     // Candlesticks.
                     for c in root.candles : Rectangle {
                         // wick
@@ -721,187 +633,5 @@ export component ClientWindow inherits Window {
             }
         }
 
-        // ════════════════════════ TRADES TAB ════════════════════════
-        if root.active_tab == 3 : VerticalLayout {
-            vertical-stretch: 1;
-            spacing: 8px;
-
-            Text { text: "IBKR FLEX WEB SERVICE"; color: #909fb7; font-size: 11px; font-weight: 700; }
-            HorizontalLayout {
-                spacing: 8px;
-                Text { text: "Token"; color: #909fb7; width: 48px; vertical-alignment: center; }
-                LineField { value <=> root.flex_token; width: 200px; }
-                Text { text: "Query ID"; color: #909fb7; width: 62px; vertical-alignment: center; }
-                LineField { value <=> root.flex_query_id; width: 120px; }
-                PaxButton { label: "FETCH"; fill: #3d8af7; width: 80px; clicked => { root.fetch_flex(); } }
-                Rectangle { }
-            }
-            Text { text: root.flex_status; color: #909fb7; font-size: 12px; }
-
-            Text { text: "TRADE HISTORY"; color: #909fb7; font-size: 11px; font-weight: 700; }
-            Text { text: root.trades_summary; color: #5a6880; font-size: 12px; }
-
-            Rectangle {
-                height: 26px;
-                background: #11192a;
-                border-radius: 6px;
-                HorizontalLayout {
-                    padding-left: 10px;
-                    padding-right: 10px;
-                    spacing: 6px;
-                    Text { text: "Date"; color: #909fb7; font-size: 10px; font-weight: 700; width: 80px; vertical-alignment: center; }
-                    Text { text: "Symbol"; color: #909fb7; font-size: 10px; font-weight: 700; width: 70px; vertical-alignment: center; }
-                    Text { text: "Side"; color: #909fb7; font-size: 10px; font-weight: 700; width: 50px; vertical-alignment: center; }
-                    Text { text: "Qty"; color: #909fb7; font-size: 10px; font-weight: 700; width: 60px; horizontal-alignment: right; vertical-alignment: center; }
-                    Text { text: "Entry"; color: #909fb7; font-size: 10px; font-weight: 700; width: 70px; horizontal-alignment: right; vertical-alignment: center; }
-                    Text { text: "Exit"; color: #909fb7; font-size: 10px; font-weight: 700; width: 70px; horizontal-alignment: right; vertical-alignment: center; }
-                    Text { text: "P&L"; color: #909fb7; font-size: 10px; font-weight: 700; width: 80px; horizontal-alignment: right; vertical-alignment: center; }
-                    Text { text: "Ret%"; color: #909fb7; font-size: 10px; font-weight: 700; width: 60px; horizontal-alignment: right; vertical-alignment: center; }
-                    Text { text: "Sector"; color: #909fb7; font-size: 10px; font-weight: 700; vertical-alignment: center; }
-                }
-            }
-
-            Rectangle {
-                vertical-stretch: 1;
-                background: #0d1420;
-                border-radius: 8px;
-                border-width: 1px;
-                border-color: #222d40;
-                if root.trades.length == 0 : VerticalLayout {
-                    padding: 12px;
-                    spacing: 4px;
-                    Text { text: "No trades loaded. To get started:"; color: #909fb7; font-size: 12px; font-weight: 700; }
-                    Text { text: "1. Log in to IBKR Account Management (portal.interactivebrokers.com)"; color: #5a6880; font-size: 11px; }
-                    Text { text: "2. Go to Performance & Reports → Flex Queries"; color: #5a6880; font-size: 11px; }
-                    Text { text: "3. Click '+' to create a new Activity Flex Query"; color: #5a6880; font-size: 11px; }
-                    Text { text: "4. Include these sections (check each, select ALL fields inside):"; color: #e9f0fb; font-size: 11px; font-weight: 700; }
-                    Text { text: "    • Trades  (under Transaction Activity)"; color: #34d399; font-size: 11px; }
-                    Text { text: "    • Net Asset Value  (trade-date or settlement-date — gives daily NAV)"; color: #34d399; font-size: 11px; }
-                    Text { text: "    • Cash Transactions  (deposits/withdrawals for accurate returns)"; color: #34d399; font-size: 11px; }
-                    Text { text: "    • Change in Position Values  (optional — additional P&L detail)"; color: #5a6880; font-size: 11px; }
-                    Text { text: "5. Set Period to 'Last 365 Calendar Days' (or longer). Format: XML."; color: #5a6880; font-size: 11px; }
-                    Text { text: "6. Save. Note the Query ID shown in the Flex Queries list."; color: #5a6880; font-size: 11px; }
-                    Text { text: "7. Go to Settings → Flex Web Service. Click 'Generate' to get a token."; color: #5a6880; font-size: 11px; }
-                    Text { text: "8. Paste the Token and Query ID above, then click FETCH."; color: #5a6880; font-size: 11px; }
-                }
-                ListView {
-                    for r[i] in root.trades : Rectangle {
-                        height: 28px;
-                        background: trade_ta.has-hover ? #1b2942 : transparent;
-                        trade_ta := TouchArea { clicked => { root.view_trade(i); } }
-                        HorizontalLayout {
-                            padding-left: 10px;
-                            padding-right: 10px;
-                            spacing: 6px;
-                            Text { text: r.date; color: #aab8d0; font-size: 11px; width: 80px; vertical-alignment: center; }
-                            Text { text: r.symbol; color: #cfe3ff; font-weight: 700; font-size: 11px; width: 70px; vertical-alignment: center; }
-                            Text { text: r.side; color: r.side == "Long" ? #34d399 : #fb5d6e; font-size: 11px; width: 50px; vertical-alignment: center; }
-                            Text { text: r.qty; color: #aab8d0; font-size: 11px; width: 60px; horizontal-alignment: right; vertical-alignment: center; }
-                            Text { text: r.entry; color: #aab8d0; font-size: 11px; width: 70px; horizontal-alignment: right; vertical-alignment: center; }
-                            Text { text: r.exit_p; color: #aab8d0; font-size: 11px; width: 70px; horizontal-alignment: right; vertical-alignment: center; }
-                            Text { text: r.pnl; color: r.up ? #34d399 : #fb5d6e; font-size: 11px; width: 80px; horizontal-alignment: right; vertical-alignment: center; }
-                            Text { text: r.ret; color: r.up ? #34d399 : #fb5d6e; font-size: 11px; width: 60px; horizontal-alignment: right; vertical-alignment: center; }
-                            Text { text: r.sector; color: #5a6880; font-size: 10px; vertical-alignment: center; }
-                        }
-                    }
-                }
-            }
-            Text { text: "Tip: click a trade to chart it."; color: #5a6880; font-size: 11px; }
-        }
-
-        // ════════════════════════ PERFORMANCE TAB ════════════════════════
-        if root.active_tab == 4 : VerticalLayout {
-            vertical-stretch: 1;
-            spacing: 6px;
-
-            HorizontalLayout {
-                spacing: 10px;
-                Text { text: "PERFORMANCE LAB"; color: #909fb7; font-size: 11px; font-weight: 700; }
-                Rectangle { }
-                Segment { label: "NAV"; active: root.perf_curve_mode == 0; width: 60px; clicked => { root.perf_curve_mode = 0; root.recompute_perf(); } }
-                Segment { label: "Returns"; active: root.perf_curve_mode == 1; width: 80px; clicked => { root.perf_curve_mode = 1; root.recompute_perf(); } }
-                PaxButton { label: "EXPORT PDF"; fill: #3d8af7; width: 120px; clicked => { root.export_pdf(); } }
-            }
-            Text { text: root.perf_summary; color: #5a6880; font-size: 12px; }
-            Text { text: root.export_status; color: #909fb7; font-size: 11px; }
-
-            // Include/exclude toggles (outside scroll so always visible).
-            HorizontalLayout {
-                spacing: 8px;
-                Segment { label: root.show_equity ? "☑ Equity" : "☐ Equity"; active: root.show_equity; width: 84px; clicked => { root.show_equity = !root.show_equity; } }
-                Segment { label: root.show_drawdown ? "☑ DD" : "☐ DD"; active: root.show_drawdown; width: 60px; clicked => { root.show_drawdown = !root.show_drawdown; } }
-                Segment { label: root.show_histogram ? "☑ Hist" : "☐ Hist"; active: root.show_histogram; width: 72px; clicked => { root.show_histogram = !root.show_histogram; } }
-                Segment { label: root.show_pies ? "☑ Pies" : "☐ Pies"; active: root.show_pies; width: 72px; clicked => { root.show_pies = !root.show_pies; } }
-                Segment { label: root.show_symbol_bar ? "☑ Syms" : "☐ Syms"; active: root.show_symbol_bar; width: 72px; clicked => { root.show_symbol_bar = !root.show_symbol_bar; } }
-                Segment { label: root.show_monthly ? "☑ Month" : "☐ Month"; active: root.show_monthly; width: 80px; clicked => { root.show_monthly = !root.show_monthly; } }
-                Rectangle { }
-            }
-
-            ScrollView {
-                vertical-stretch: 1;
-                VerticalLayout {
-                    spacing: 8px;
-
-                    if root.show_equity : Image {
-                        source: root.equity_img;
-                        min-height: 200px;
-                        image-fit: contain;
-                    }
-
-                    if root.show_drawdown : Image {
-                        source: root.drawdown_img;
-                        min-height: 140px;
-                        image-fit: contain;
-                    }
-
-                    // Metrics grid (two columns side by side).
-                    Rectangle {
-                        height: 280px;
-                        background: #0d1420;
-                        border-radius: 8px;
-                        border-width: 1px;
-                        border-color: #222d40;
-                        clip: true;
-                        ScrollView {
-                            VerticalLayout {
-                                padding: 10px;
-                                spacing: 2px;
-                                Text { text: "METRICS"; color: #909fb7; font-size: 11px; font-weight: 700; }
-                                for m in root.perf_metrics : HorizontalLayout {
-                                    height: 20px;
-                                    Text { text: m.label; color: #909fb7; font-size: 12px; width: 180px; vertical-alignment: center; }
-                                    Text { text: m.value; color: #e9f0fb; font-size: 12px; font-weight: 700; vertical-alignment: center; }
-                                }
-                            }
-                        }
-                    }
-
-                    if root.show_histogram : Image {
-                        source: root.histogram_img;
-                        min-height: 200px;
-                        image-fit: contain;
-                    }
-
-                    if root.show_pies : HorizontalLayout {
-                        spacing: 4px;
-                        Image { source: root.pie_side_img; horizontal-stretch: 1; min-height: 200px; image-fit: contain; }
-                        Image { source: root.pie_sector_img; horizontal-stretch: 1; min-height: 200px; image-fit: contain; }
-                        Image { source: root.pie_winloss_img; horizontal-stretch: 1; min-height: 200px; image-fit: contain; }
-                    }
-
-                    if root.show_symbol_bar : Image {
-                        source: root.symbol_bar_img;
-                        min-height: 200px;
-                        image-fit: contain;
-                    }
-
-                    if root.show_monthly : Image {
-                        source: root.monthly_img;
-                        min-height: 200px;
-                        image-fit: contain;
-                    }
-                }
-            }
-        }
     }
 }
