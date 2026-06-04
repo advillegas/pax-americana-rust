@@ -20,8 +20,6 @@ struct Persisted {
     execution_mode: ExecutionMode,
     multiplier: f64,
     max_drawdown_pct: f64,
-    max_position_notional: f64,
-    max_position_qty: f64,
     ib_host: String,
     ib_port_live: u16,
     ib_port_paper: u16,
@@ -37,8 +35,6 @@ fn apply(c: &mut Controls, ps: Persisted) {
     c.execution_mode = ps.execution_mode;
     c.multiplier = ps.multiplier;
     c.max_drawdown_pct = ps.max_drawdown_pct;
-    c.max_position_notional = ps.max_position_notional;
-    c.max_position_qty = ps.max_position_qty;
     c.ib_host = ps.ib_host;
     c.ib_port_live = ps.ib_port_live;
     c.ib_port_paper = ps.ib_port_paper;
@@ -74,8 +70,6 @@ pub fn save(c: &Controls) {
         execution_mode: c.execution_mode,
         multiplier: c.multiplier,
         max_drawdown_pct: c.max_drawdown_pct,
-        max_position_notional: c.max_position_notional,
-        max_position_qty: c.max_position_qty,
         ib_host: c.ib_host.clone(),
         ib_port_live: c.ib_port_live,
         ib_port_paper: c.ib_port_paper,

@@ -35,9 +35,6 @@ pub fn desired_working_orders(
         if qty < 1.0 && mo.quantity != 0.0 && sizing.force_min_one {
             qty = 1.0;
         }
-        if sizing.max_position_qty > 0.0 {
-            qty = qty.min(sizing.max_position_qty);
-        }
         if qty <= 0.0 {
             continue;
         }

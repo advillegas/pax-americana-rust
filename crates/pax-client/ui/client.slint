@@ -101,8 +101,6 @@ export component ClientWindow inherits Window {
     in-out property <int> hours_mode;      // 0 = 24h, 1 = regular trading hours only
     in-out property <string> multiplier;
     in-out property <string> drawdown;
-    in-out property <string> max_notional;
-    in-out property <string> max_qty;
     in-out property <string> host;
     in-out property <string> live_port;
     in-out property <string> paper_port;
@@ -241,14 +239,6 @@ export component ClientWindow inherits Window {
                 LineField { value <=> root.multiplier; width: 80px; }
                 Text { text: "Max Drawdown %"; color: #909fb7; width: 120px; vertical-alignment: center; }
                 LineField { value <=> root.drawdown; width: 80px; }
-                Rectangle { }
-            }
-            HorizontalLayout {
-                spacing: 8px;
-                Text { text: "Max Pos $"; color: #909fb7; width: 90px; vertical-alignment: center; }
-                LineField { value <=> root.max_notional; width: 110px; }
-                Text { text: "Max Pos Qty"; color: #909fb7; width: 110px; vertical-alignment: center; }
-                LineField { value <=> root.max_qty; width: 110px; }
                 Rectangle { }
             }
             HorizontalLayout {

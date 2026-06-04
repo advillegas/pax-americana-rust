@@ -434,8 +434,6 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             multiplier: controls.multiplier,
             master_balance: snap.balance,
             client_balance,
-            max_position_notional: controls.max_position_notional,
-            max_position_qty: controls.max_position_qty,
             force_min_one: true,
         };
         let long_only = controls.trade_mode == TradeMode::LongOnly;
@@ -590,30 +588,6 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             }
         }
 
-        // L1: apply the CURRENT risk caps (Max Pos $ / Qty) to the locked targets every
-        // cycle, so tightening a cap mid-session takes effect immediately rather than only
-        // on the master's next change. Stable when caps are unchanged (no churn).
-        let mut active_targets = locked_targets.clone();
-        if controls.max_position_qty > 0.0 || controls.max_position_notional > 0.0 {
-            let price_of: BTreeMap<&str, f64> =
-                snap.positions.iter().map(|p| (p.symbol.as_str(), p.avg_cost)).collect();
-            for (sym, t) in active_targets.iter_mut() {
-                if controls.max_position_qty > 0.0 && t.abs() > controls.max_position_qty {
-                    *t = controls.max_position_qty * t.signum();
-                }
-                if controls.max_position_notional > 0.0 {
-                    if let Some(px) = price_of.get(sym.as_str()) {
-                        if *px > 0.0 {
-                            let cap = (controls.max_position_notional / px).floor();
-                            if t.abs() > cap {
-                                *t = cap * t.signum();
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         let input = ReconcileInput {
             master: &master_eff,
             client: &client_eff,
@@ -622,9 +596,8 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             long_only,
             split_zero_cross: true,
             empty_master_guard: 2,
-            // Locked, balance-stable targets (with live caps applied): resize only when the
-            // master's ledger changes or a cap tightens.
-            targets: Some(&active_targets),
+            // Locked, balance-stable targets: resize only when the master's ledger changes.
+            targets: Some(&locked_targets),
         };
         let result = reconcile(&input);
 
