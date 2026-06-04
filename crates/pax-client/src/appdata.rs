@@ -5,10 +5,8 @@
 //! obfuscation, not encryption — it deters casual viewing/tampering, nothing more.
 
 use std::fs;
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const OBFS_KEY: &[u8] = b"px-amrcn-2026-ledger-obfuscation-key";
 
 /// Hidden app-data directory, created (and hidden) on first use.
@@ -30,12 +28,26 @@ fn file(name: &str) -> Option<PathBuf> {
     Some(dir()?.join(name))
 }
 
-/// Best-effort Windows "hidden" attribute (no console flash).
+/// Set the Windows FILE_ATTRIBUTE_HIDDEN flag via the Win32 API directly.
+/// No subprocess spawning (avoids attrib.exe errors on low-memory systems).
 fn hide(p: &Path) {
-    let _ = std::process::Command::new("attrib")
-        .args(["+h", &p.to_string_lossy()])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
+    use std::os::windows::ffi::OsStrExt;
+
+    extern "system" {
+        fn GetFileAttributesW(lpFileName: *const u16) -> u32;
+        fn SetFileAttributesW(lpFileName: *const u16, dwFileAttributes: u32) -> i32;
+    }
+
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    const INVALID: u32 = 0xFFFF_FFFF;
+
+    let wide: Vec<u16> = p.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    unsafe {
+        let attrs = GetFileAttributesW(wide.as_ptr());
+        if attrs != INVALID {
+            SetFileAttributesW(wide.as_ptr(), attrs | FILE_ATTRIBUTE_HIDDEN);
+        }
+    }
 }
 
 /// Reversible, non-cryptographic byte obfuscation so files aren't human-readable.
