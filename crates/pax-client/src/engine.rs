@@ -222,14 +222,19 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
                 match upd {
                     OrderUpdate::ExecutionData(d) => {
                         let lvl = if d.execution.side == "SLD" { LogLevel::Sell } else { LogLevel::Buy };
+                        // Include order id + cumulative qty so partial fills of ONE order
+                        // (same id, rising cum) are distinguishable from repeated orders
+                        // (different ids) at a glance.
                         state.log(
                             lvl,
                             format!(
-                                "FILL {} {} {:.0} @ {:.2}",
+                                "FILL {} {} {:.0} @ {:.2} (ord {}, cum {:.0})",
                                 d.execution.side,
                                 d.contract.symbol,
                                 d.execution.shares,
-                                d.execution.price
+                                d.execution.price,
+                                d.execution.order_id,
+                                d.execution.cumulative_quantity
                             ),
                         );
                     }
