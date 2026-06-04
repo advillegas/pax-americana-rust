@@ -7,7 +7,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::state::{LogLevel, SharedState};
 
@@ -20,20 +20,33 @@ pub fn spawn(state: Arc<SharedState>) {
     thread::spawn(move || worker_loop(state));
 }
 
+const AUTO_REFRESH_SECS: u64 = 3600; // 1 hour
+
 fn worker_loop(state: Arc<SharedState>) {
+    let mut last_fetch = Instant::now();
+
     loop {
-        // Guard: if any operation panics, log it and keep the loop alive.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Manual fetch request from the GUI.
             if state.flex_request.swap(false, Ordering::Relaxed) {
-                let (token, query_id) = {
-                    let cfg = state.flex_config.lock();
-                    (cfg.token.clone(), cfg.query_id.clone())
-                };
-                if token.is_empty() || query_id.is_empty() {
-                    *state.flex_status.lock() = "Set Flex token and Query ID first.".into();
-                } else {
-                    fetch_and_process(&state, &token, &query_id);
+                if try_fetch(&state) {
+                    last_fetch = Instant::now();
                 }
+            }
+
+            // Hourly auto-refresh (only if token + query are configured).
+            if last_fetch.elapsed() >= Duration::from_secs(AUTO_REFRESH_SECS) {
+                let has_config = {
+                    let cfg = state.flex_config.lock();
+                    !cfg.token.is_empty() && !cfg.query_id.is_empty()
+                };
+                if has_config {
+                    state.log(LogLevel::Info, "Flex: hourly auto-refresh…");
+                    if try_fetch(&state) {
+                        last_fetch = Instant::now();
+                    }
+                }
+                last_fetch = Instant::now(); // reset even on failure to avoid tight retry
             }
 
             if state.perf_recompute.swap(false, Ordering::Relaxed) {
@@ -53,7 +66,20 @@ fn worker_loop(state: Arc<SharedState>) {
     }
 }
 
-fn fetch_and_process(state: &SharedState, token: &str, query_id: &str) {
+/// Attempt a fetch using the currently configured token + query ID. Returns true on success.
+fn try_fetch(state: &SharedState) -> bool {
+    let (token, query_id) = {
+        let cfg = state.flex_config.lock();
+        (cfg.token.clone(), cfg.query_id.clone())
+    };
+    if token.is_empty() || query_id.is_empty() {
+        *state.flex_status.lock() = "Set Flex token and Query ID first.".into();
+        return false;
+    }
+    fetch_and_process(state, &token, &query_id)
+}
+
+fn fetch_and_process(state: &SharedState, token: &str, query_id: &str) -> bool {
     *state.flex_status.lock() = "Sending request to IBKR…".into();
     state.log(LogLevel::Info, "Flex: sending request…");
 
@@ -73,12 +99,12 @@ fn fetch_and_process(state: &SharedState, token: &str, query_id: &str) {
                     Ok(s) => s,
                     Err(e) => {
                         set_err(state, &format!("Read error: {e}"));
-                        return;
+                        return false;
                     }
                 },
                 Err(e) => {
                     set_err(state, &format!("HTTP error: {e}"));
-                    return;
+                    return false;
                 }
             };
 
@@ -90,11 +116,11 @@ fn fetch_and_process(state: &SharedState, token: &str, query_id: &str) {
                 || msg.contains("heavy load") || msg.contains("Too many");
             if !transient {
                 set_err(state, &format!("Flex: {msg}"));
-                return;
+                return false;
             }
         }
         set_err(state, "IBKR unavailable after retries. Wait 5 min, then FETCH again.");
-        return;
+        return false;
     };
 
     *state.flex_status.lock() = format!("Statement generating (ref {ref_code})…");
@@ -104,7 +130,7 @@ fn fetch_and_process(state: &SharedState, token: &str, query_id: &str) {
         attempts += 1;
         if attempts > 30 {
             set_err(state, "Flex statement timed out.");
-            return;
+            return false;
         }
         thread::sleep(Duration::from_secs(2));
 
@@ -114,12 +140,12 @@ fn fetch_and_process(state: &SharedState, token: &str, query_id: &str) {
                 Ok(s) => s,
                 Err(e) => {
                     set_err(state, &format!("Read error: {e}"));
-                    return;
+                    return false;
                 }
             },
             Err(e) => {
                 set_err(state, &format!("HTTP error: {e}"));
-                return;
+                return false;
             }
         };
 
@@ -133,7 +159,7 @@ fn fetch_and_process(state: &SharedState, token: &str, query_id: &str) {
         if body.contains("<Status>Fail</Status>") {
             let msg = extract_tag(&body, "ErrorMessage").unwrap_or_else(|| "Unknown".into());
             set_err(state, &format!("Flex error: {msg}"));
-            return;
+            return false;
         }
     };
 
@@ -150,8 +176,12 @@ fn fetch_and_process(state: &SharedState, token: &str, query_id: &str) {
             *state.flex_status.lock() = format!("Loaded: {nt} trades, {nn} NAV points.");
             state.log(LogLevel::Ok, format!("Flex: {nt} trades, {nn} NAV points."));
             recompute(state);
+            true
         }
-        Err(e) => set_err(state, &format!("Parse error: {e}")),
+        Err(e) => {
+            set_err(state, &format!("Parse error: {e}"));
+            false
+        }
     }
 }
 
