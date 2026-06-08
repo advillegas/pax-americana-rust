@@ -14,8 +14,7 @@ use std::time::{Duration, Instant};
 use ibapi::client::blocking::Client;
 use ibapi::orders::OrderUpdate;
 use pax_core::{
-    desired_working_orders, diff_working_orders, effective_positions, reconcile, target_net_qty,
-    IntentReason, ReconcileInput, Side, SizingParams, WorkingOrder,
+    reconcile, target_net_qty, IntentReason, ReconcileInput, Side, SizingParams, WorkingOrder,
 };
 
 use crate::config::{stable_client_id, ClientConfig};
@@ -154,7 +153,6 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
     let order_stream = client.order_update_stream().ok();
 
     let mut cooldown: HashMap<String, Instant> = HashMap::new();
-    let mut wo_cooldown: HashMap<String, Instant> = HashMap::new();
     // Order id → (symbol, side) for orders we placed, so async status updates (fills /
     // rejections) can be attributed back to a contract and side.
     let mut placed_orders: HashMap<i32, (String, Side)> = HashMap::new();
@@ -189,7 +187,9 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
     // THAT symbol's master net changes — so a move in one name, or a re-priced master order,
     // never re-sizes a symbol the master left untouched. `last_wo_fp` gates the resting-order
     // replication independently.
-    let (mut seen_master_net, mut locked_targets, mut last_wo_fp, mut locked_desired) =
+    // `last_wo_fp` / `locked_desired` are retained only to round-trip older ledgers; this
+    // positions-only build no longer replicates resting orders, so they are never updated.
+    let (mut seen_master_net, mut locked_targets, last_wo_fp, locked_desired) =
         match crate::ledger::load(&account) {
             Some(l) => {
                 state.log(
@@ -206,6 +206,20 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             ),
         };
     let mut last_ledger_save = Instant::now();
+
+    // Positions-only mode: this build never places resting limit/stop orders. Cancel any
+    // leftover resting orders (e.g. from an older order-replication build) so the account
+    // holds positions only — nothing rests to churn or fill unexpectedly. One-time on
+    // connect; the engine places only market orders afterward, so none reaccumulate.
+    {
+        let stale = ib::read_open_orders(&client, &account).unwrap_or_default();
+        if !stale.is_empty() {
+            state.log(LogLevel::Warn, format!("Clearing {} leftover resting order(s) (positions-only).", stale.len()));
+            for (id, _w) in &stale {
+                let _ = ib::cancel_order(&client, *id);
+            }
+        }
+    }
 
     while state.is_running() {
         // ── periodic license re-check (revocation stops trading) ──────────────
@@ -427,26 +441,17 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         let long_only = controls.trade_mode == TradeMode::LongOnly;
 
         // ── Source-change gate ────────────────────────────────────────────────
-        // Recompute the desired client structure (target net positions + replicated working
-        // orders) ONLY when the source ledger actually changes. Targets are sized
-        // proportionally to the CURRENT balances at that instant, then held — so a matched
-        // book is never resized by mere balance/price drift (the source of commission bleed).
+        // Recompute a symbol's target net position ONLY when the source's net position in
+        // that symbol actually changes. Targets are sized proportionally to the CURRENT
+        // balances at that instant, then held — so a matched book is never resized by mere
+        // balance/price drift (the source of commission bleed). This build copies POSITIONS
+        // only; the source's resting limit/stop orders are intentionally ignored.
         if sizing.ratio().is_some() {
             let mut changed = false;
 
-            // Resting-order replication: recompute only when the source's working orders change.
-            let wo_fp = working_orders_fingerprint(&snap.working_orders);
-            if last_wo_fp.as_deref() != Some(wo_fp.as_str()) {
-                locked_desired =
-                    desired_working_orders(&snap.working_orders, &sizing, long_only, &client_positions);
-                last_wo_fp = Some(wo_fp);
-                changed = true;
-            }
-
-            // Position targets: recompute PER SYMBOL, only where the master net changed.
-            let master_eff_now = effective_positions(&snap.positions, &snap.working_orders);
+            // Position targets: recompute PER SYMBOL, only where the source net changed.
             let mut now_net: BTreeMap<String, (f64, f64)> = BTreeMap::new(); // sym -> (net, price)
-            for p in &master_eff_now {
+            for p in &snap.positions {
                 now_net.insert(p.symbol.clone(), (p.net_qty, p.avg_cost));
             }
             // Walk the union of previously-tracked and currently-held master symbols.
@@ -483,94 +488,35 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             }
         }
 
-        // ── Channel 1: replicate the source's resting limit/stop orders ─────────
-        // `desired` is the LOCKED working-order set (recomputed only on ledger change above).
-        let desired = &locked_desired;
-        // One read of ALL live orders (incl. in-flight market orders) drives both the
-        // working-order diff and the anti-stacking guard used by the market reconcile below.
+        // Read our own in-flight orders so we never stack a second market order on a
+        // contract/side that already has one working (IBKR error 201). This build places
+        // ONLY market orders, so any resting orders found are cleaned up below.
         let live_orders = ib::read_live_orders(&client, &account).unwrap_or_default();
-        // Contracts/sides that already have one of OUR market orders working — never stack
-        // a second market order on the same one (this is what trips IBKR error 201).
         let active_market_sides: HashSet<(String, Side)> = live_orders
             .iter()
             .filter(|o| matches!(o.kind, pax_core::OrderKind::Market))
             .map(|o| (o.symbol.clone(), o.side))
             .collect();
-        let current_working: Vec<(i32, pax_core::WorkingOrder)> = live_orders
-            .iter()
-            .filter(|o| !matches!(o.kind, pax_core::OrderKind::Market))
-            .map(|o| (o.id, o.to_working()))
-            .collect();
-        let current_wo: Vec<pax_core::WorkingOrder> =
-            current_working.iter().map(|(_, w)| w.clone()).collect();
-        let wdiff = diff_working_orders(desired, &current_wo);
-
-        for key in &wdiff.to_cancel {
-            if let Some((id, w)) = current_working.iter().find(|(_, w)| &w.key() == key) {
-                match ib::cancel_order(&client, *id) {
-                    Ok(()) => state.log(LogLevel::Warn, format!("Cancel order {} {}", w.side.as_ib(), w.symbol)),
-                    Err(e) => state.log(LogLevel::Err, format!("Cancel failed {}: {e}", w.symbol)),
-                }
+        // Self-heal: cancel any resting (non-market) orders that appear — this build never
+        // wants them, so the account stays positions-only no matter what.
+        for o in live_orders.iter().filter(|o| !matches!(o.kind, pax_core::OrderKind::Market)) {
+            if ib::cancel_order(&client, o.id).is_ok() {
+                state.log(LogLevel::Warn, format!("Cancel stray resting order {} {}", o.side.as_ib(), o.symbol));
             }
         }
-        for w in &wdiff.to_place {
-            // Margin: gate entry (opening) orders against live buying power via what-if.
-            // Protective orders (stops/limits that reduce risk) still go through.
-            if w.is_entry
-                && !open_allowed(
-                    &client, state, &account, &w.symbol, &w.currency, &w.exchange, w.side, w.quantity, w.kind,
-                    w.limit_price, w.aux_price, &mut projected_available,
-                )
-            {
-                continue;
-            }
-            if let Some(t) = wo_cooldown.get(&w.key()) {
-                if t.elapsed() < cooldown_dur {
-                    continue;
-                }
-            }
-            // Don't re-place an entry on a contract/side IBKR just rejected.
-            if w.is_entry && in_backoff(&reject_backoff, &w.symbol, w.side) {
-                continue;
-            }
-            match ib::place_order(
-                &client, &account, &w.symbol, &w.currency, &w.exchange, w.side, w.quantity, w.kind, w.limit_price, w.aux_price,
-            ) {
-                Ok(id) => {
-                    placed_orders.insert(id, (w.symbol.clone(), w.side));
-                    wo_cooldown.insert(w.key(), Instant::now());
-                    state.with_status(|s| s.orders_placed += 1);
-                    let lvl = if w.side == Side::Buy { LogLevel::Buy } else { LogLevel::Sell };
-                    let px = if w.kind == pax_core::OrderKind::Limit { w.limit_price } else { w.aux_price };
-                    state.log(
-                        lvl,
-                        format!("{:<4} {:<6} qty={:.0} {} @ {:.2}", w.side.as_ib(), w.symbol, w.quantity, w.kind.as_ib(), px),
-                    );
-                }
-                Err(e) => {
-                    state.with_status(|s| s.orders_failed += 1);
-                    state.log(LogLevel::Err, format!("Order failed {}: {e}", w.symbol));
-                }
-            }
-            thread::sleep(Duration::from_millis(250));
-        }
 
-        // ── Channel 2: position safety net on EFFECTIVE exposure ───────────────
-        // Effective exposure folds *entry* working orders into positions so the safety
-        // net won't market-fill what a resting limit order will cover; protective orders
-        // ride alongside their position. Market orders here only correct genuine drift.
-        let master_eff = effective_positions(&snap.positions, &snap.working_orders);
-        let client_eff = effective_positions(&client_positions, desired);
-
+        // ── Position safety net: match the source's NET positions via market orders ─────
+        // Copy actual positions only — the source's pending resting orders are ignored, so
+        // the client acts when a position genuinely changes (the source's order fills).
         let input = ReconcileInput {
-            master: &master_eff,
-            client: &client_eff,
+            master: &snap.positions,
+            client: &client_positions,
             master_connected: snap.connected,
             sizing,
             long_only,
             split_zero_cross: true,
             empty_master_guard: 2,
-            // Locked, balance-stable targets: resize only when the master's ledger changes.
+            // Locked, balance-stable targets: resize only when the source's net changes.
             targets: Some(&locked_targets),
         };
         let result = reconcile(&input);
@@ -732,17 +678,6 @@ fn is_notice_noise(code: i32) -> bool {
     // 2161 = limit-order price-capped per IBKR's disruptive-order control (informational;
     // the order still rests and works). Routine noise on the working-order channel.
     matches!(code, 202 | 2100 | 2103 | 2104 | 2105 | 2106 | 2107 | 2108 | 2119 | 2150 | 2158 | 2161)
-}
-
-/// Balance-independent signature of the master's ledger (net positions + resting orders).
-/// It changes only when the master opens/closes/resizes a position or alters a working
-/// order — never on balance or price drift — so it gates exactly when the client re-syncs.
-/// Stable signature of just the source's resting orders, used to gate the working-order channel
-/// (position targets are gated separately, per symbol).
-fn working_orders_fingerprint(working: &[WorkingOrder]) -> String {
-    let mut parts: Vec<String> = working.iter().map(|w| w.key()).collect();
-    parts.sort();
-    parts.join("|")
 }
 
 /// True while `(symbol, side)` is within its post-rejection cool-off window.
