@@ -53,7 +53,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         (c.account_mode, c.ib_host.clone(), c.ib_port_live, c.ib_port_paper, c.master_url.clone())
     };
     let api = MasterApi::new(&master_url, &cfg.master_api_key);
-    state.log(LogLevel::Info, "Connecting to server…".to_string());
+    state.log(LogLevel::Info, "Connecting…".to_string());
     let port = match account_mode {
         AccountMode::Live => port_live,
         AccountMode::Paper => port_paper,
@@ -194,7 +194,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             Some(l) => {
                 state.log(
                     LogLevel::Ok,
-                    format!("Resumed saved ledger ({} targets) — no resize unless the server changed.", l.targets.len()),
+                    format!("Resumed saved positions ({} symbols) — holding unless the strategy changes.", l.targets.len()),
                 );
                 (l.seen_master_net, l.targets, l.wo_fingerprint, l.desired)
             }
@@ -400,7 +400,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
                     .map(|t| t.elapsed() > Duration::from_secs(30))
                     .unwrap_or(true);
                 if warn {
-                    state.log(LogLevel::Warn, format!("Server sync skipped: {e} (client stays connected to IB)"));
+                    state.log(LogLevel::Warn, format!("Sync skipped: {e} (still connected to IB)"));
                     last_unreachable_warn = Some(Instant::now());
                 }
                 state.with_status(|s| s.master_connected = false);
@@ -481,7 +481,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             }
 
             if changed {
-                state.log(LogLevel::Info, "Server ledger changed — re-synced affected symbols.".to_string());
+                state.log(LogLevel::Info, "Strategy updated — re-synced affected symbols.".to_string());
                 // Persist immediately so a restart right after a change resumes the new state.
                 crate::ledger::save(&account, &seen_master_net, &locked_targets, &last_wo_fp, &locked_desired);
                 last_ledger_save = Instant::now();

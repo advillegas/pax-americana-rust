@@ -244,16 +244,16 @@ fn main() {
                 } else if s.connected && s.master_connected {
                     "● CONNECTED - syncing".to_string()
                 } else if s.connected {
-                    "● CONNECTED to IB - waiting for server".to_string()
+                    "● CONNECTED - standby".to_string()
                 } else if running {
-                    "... connecting to IB".to_string()
+                    "... connecting".to_string()
                 } else {
                     "■ STOPPED".to_string()
                 }
                 .into(),
             );
             ui.set_balance_text(format!("Net Liquidation: {}", money(s.client_balance)).into());
-            ui.set_server_text(if s.master_connected { "Server: online" } else { "Server: offline" }.into());
+            ui.set_server_text(if s.master_connected { "Sync: active" } else { "Sync: standby" }.into());
             ui.set_counts_text(
                 format!(
                     "Positions {}     Opened {}   Closed {}   Failed {}",

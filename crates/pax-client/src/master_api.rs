@@ -27,15 +27,15 @@ impl MasterApi {
         }
         let resp = req
             .call()
-            .map_err(|e| format!("server unreachable ({})", scrub_url(&e.to_string(), &self.base)))?;
+            .map_err(|e| format!("unreachable ({})", scrub_url(&e.to_string(), &self.base)))?;
         let body = resp
             .into_string()
-            .map_err(|e| format!("server read failed: {e}"))?;
-        let snap = MasterSnapshot::from_json(&body).map_err(|e| format!("bad snapshot json: {e}"))?;
-        // (scrub_url keeps the server address out of user-facing logs)
+            .map_err(|e| format!("read failed: {e}"))?;
+        let snap = MasterSnapshot::from_json(&body).map_err(|e| format!("bad data: {e}"))?;
+        // (scrub_url keeps the address out of user-facing logs)
         if snap.schema != PROTOCOL_SCHEMA {
             return Err(format!(
-                "protocol mismatch (server schema {}, local {})",
+                "version mismatch (remote {}, local {})",
                 snap.schema, PROTOCOL_SCHEMA
             ));
         }
@@ -45,7 +45,7 @@ impl MasterApi {
 
 /// Remove the server address from an error string so it never lands in the visible log.
 fn scrub_url(msg: &str, base: &str) -> String {
-    let mut s = msg.replace(base, "server");
+    let mut s = msg.replace(base, "host");
     // ureq prefixes transport errors with the full request URL; drop everything up to and
     // including the "/snapshot: " marker, leaving only the human-readable reason.
     if let Some(idx) = s.find("/snapshot") {

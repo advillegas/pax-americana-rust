@@ -43,7 +43,7 @@ impl IntentReason {
             IntentReason::OpenMissing => "open missing",
             IntentReason::IncreaseToTarget => "increase",
             IntentReason::ReduceToTarget => "reduce",
-            IntentReason::CloseOrphan => "close orphan",
+            IntentReason::CloseOrphan => "close",
             IntentReason::FlattenLeg => "flatten",
             IntentReason::OpenLeg => "open",
         }
@@ -126,7 +126,7 @@ pub fn reconcile(input: &ReconcileInput) -> ReconcileResult {
     // ── Global safety guards ────────────────────────────────────────────────
     if !input.master_connected {
         result.blocked = true;
-        result.blocked_reason = Some("server not connected — sync skipped".to_string());
+        result.blocked_reason = Some("standing by — sync paused".to_string());
         return result;
     }
     if input.sizing.ratio().is_none() {
@@ -138,7 +138,7 @@ pub fn reconcile(input: &ReconcileInput) -> ReconcileResult {
     if input.master.is_empty() && input.client.len() > input.empty_master_guard {
         result.blocked = true;
         result.blocked_reason = Some(format!(
-            "server shows 0 positions but local book holds {} — refusing mass-close",
+            "0 target positions but local book holds {} — holding (safety)",
             input.client.len()
         ));
         return result;
