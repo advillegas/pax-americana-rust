@@ -79,10 +79,13 @@ fn data_main(_cfg: ClientConfig, state: Arc<SharedState>) {
         let mut errored = false;
 
         loop {
-            // Reconnect if the operator changed the connection target.
+            // Reconnect if the operator changed the connection target OR the selected
+            // account. The data thread starts before the account is picked, so it must
+            // re-resolve and re-subscribe when the GUI selection changes — otherwise the
+            // Portfolio tab keeps showing whatever account was resolved first.
             let changed = {
                 let c = state.controls.lock();
-                c.account_mode != mode || c.ib_host != host
+                c.account_mode != mode || c.ib_host != host || c.ib_account.trim() != want_account
             };
             if changed {
                 break;
