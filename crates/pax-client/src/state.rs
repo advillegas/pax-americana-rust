@@ -85,6 +85,19 @@ pub struct Controls {
     /// When true, place no orders outside US equity regular trading hours (09:30–16:00 ET,
     /// Mon–Fri). The engine keeps polling and reflecting status; it just won't trade.
     pub rth_only: bool,
+    // ── Disconnect email alerts ───────────────────────────────────────────────
+    /// Send the client an email if the IB connection stays down (weekdays) past a threshold.
+    pub alerts_enabled: bool,
+    /// Recipient (the end client's email).
+    pub alert_email: String,
+    /// Hours disconnected (weekday time only) before the first alert; resent hourly after.
+    pub alert_after_hours: f64,
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    pub smtp_user: String,
+    pub smtp_pass: String,
+    /// From address (defaults to smtp_user if blank).
+    pub smtp_from: String,
 }
 
 impl Default for Controls {
@@ -101,6 +114,14 @@ impl Default for Controls {
             ib_account: String::new(),
             master_url: "http://148.113.203.188:5001".to_string(),
             rth_only: false,
+            alerts_enabled: false,
+            alert_email: String::new(),
+            alert_after_hours: 2.0,
+            smtp_host: String::new(),
+            smtp_port: 587,
+            smtp_user: String::new(),
+            smtp_pass: String::new(),
+            smtp_from: String::new(),
         }
     }
 }
@@ -256,6 +277,11 @@ pub struct SharedState {
     pub chart_anchor: AtomicUsize,
     /// Bumped whenever `chart` is re-rendered, so the GUI knows to push it.
     pub chart_gen: AtomicU64,
+    // ── Disconnect alerts ─────────────────────────────────────────────────────
+    /// Set by the GUI to request a one-off test email.
+    pub alert_test: AtomicBool,
+    /// Last alert/test result, surfaced in the GUI.
+    pub alert_status: Mutex<String>,
 }
 
 impl SharedState {
@@ -282,6 +308,8 @@ impl SharedState {
             chart_start: AtomicUsize::new(0),
             chart_anchor: AtomicUsize::new(0),
             chart_gen: AtomicU64::new(0),
+            alert_test: AtomicBool::new(false),
+            alert_status: Mutex::new(String::new()),
         })
     }
 

@@ -23,6 +23,7 @@ struct Candle {
 
 component LineField inherits Rectangle {
     in-out property <string> value;
+    in property <bool> password;
     height: 28px;
     background: #0d1420;
     border-radius: 6px;
@@ -36,6 +37,7 @@ component LineField inherits Rectangle {
         color: #e9f0fb;
         font-size: 14px;
         text <=> root.value;
+        input-type: root.password ? InputType.password : InputType.text;
     }
 }
 
@@ -107,6 +109,17 @@ export component ClientWindow inherits Window {
     in-out property <string> account;
     in property <[string]> accounts;
 
+    // Disconnect email alerts
+    in-out property <bool> alerts_enabled;
+    in-out property <string> alert_email;
+    in-out property <string> alert_hours;
+    in-out property <string> smtp_host;
+    in-out property <string> smtp_port;
+    in-out property <string> smtp_user;
+    in-out property <string> smtp_pass;
+    in-out property <string> smtp_from;
+    in property <string> alert_status;
+
     in property <string> update_text;
     in property <bool> update_available;
 
@@ -154,6 +167,7 @@ export component ClientWindow inherits Window {
     callback chart_drag_to(length, length); // (delta-x from press, plot width)
     callback chart_scroll(bool);            // true = forward in time
     callback chart_zoom(bool);              // true = zoom in
+    callback test_alert();
 
     VerticalLayout {
         padding: 16px;
@@ -289,6 +303,43 @@ export component ClientWindow inherits Window {
                 spacing: 10px;
                 PaxButton { label: "SAVE SETTINGS"; width: 160px; clicked => { root.save(); } }
                 Text { text: "Modes/risk apply live; host & ports apply on START."; color: #5a6880; font-size: 11px; vertical-alignment: center; }
+            }
+
+            // ── Disconnect email alerts ─────────────────────────────────────
+            Text { text: "DISCONNECT ALERTS"; color: #909fb7; font-size: 11px; font-weight: 700; }
+            HorizontalLayout {
+                spacing: 8px;
+                Segment { label: "Off"; active: !root.alerts_enabled; width: 56px; clicked => { root.alerts_enabled = false; } }
+                Segment { label: "On"; active: root.alerts_enabled; width: 56px; clicked => { root.alerts_enabled = true; } }
+                Text { text: "Email"; color: #909fb7; width: 44px; vertical-alignment: center; }
+                LineField { value <=> root.alert_email; width: 200px; }
+                Text { text: "After (hrs)"; color: #909fb7; width: 70px; vertical-alignment: center; }
+                LineField { value <=> root.alert_hours; width: 56px; }
+                Rectangle { }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "SMTP host"; color: #909fb7; width: 70px; vertical-alignment: center; }
+                LineField { value <=> root.smtp_host; width: 180px; }
+                Text { text: "Port"; color: #909fb7; width: 32px; vertical-alignment: center; }
+                LineField { value <=> root.smtp_port; width: 60px; }
+                Rectangle { }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "User"; color: #909fb7; width: 70px; vertical-alignment: center; }
+                LineField { value <=> root.smtp_user; width: 160px; }
+                Text { text: "Pass"; color: #909fb7; width: 32px; vertical-alignment: center; }
+                LineField { value <=> root.smtp_pass; password: true; width: 140px; }
+                Rectangle { }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "From"; color: #909fb7; width: 70px; vertical-alignment: center; }
+                LineField { value <=> root.smtp_from; width: 200px; }
+                PaxButton { label: "SEND TEST"; fill: #3d8af7; width: 110px; clicked => { root.save(); root.test_alert(); } }
+                Text { text: root.alert_status; color: #909fb7; font-size: 11px; vertical-alignment: center; }
+                Rectangle { }
             }
 
             HorizontalLayout {

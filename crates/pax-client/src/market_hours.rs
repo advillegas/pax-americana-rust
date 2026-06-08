@@ -16,6 +16,20 @@ pub fn is_us_equity_rth_now() -> bool {
     is_rth_at(secs)
 }
 
+/// True if *now* falls on a US-Eastern weekend (Saturday or Sunday). Used to exclude
+/// weekends from disconnect-alert timing (markets are closed, so a disconnect is benign).
+pub fn is_weekend_et_now() -> bool {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let (y, m, d) = civil_from_days(secs.div_euclid(86_400));
+    let offset_hours: i64 = if is_us_dst(y, m, d) { -4 } else { -5 };
+    let east_days = (secs + offset_hours * 3600).div_euclid(86_400);
+    let weekday = (east_days.rem_euclid(7) + 4).rem_euclid(7); // 0 = Sunday
+    weekday == 0 || weekday == 6
+}
+
 /// True if the given UNIX timestamp (UTC seconds) is within US equity RTH.
 pub fn is_rth_at(utc_secs: i64) -> bool {
     // Pick the Eastern offset from the UTC calendar date (the 1-hour ambiguity at the 02:00

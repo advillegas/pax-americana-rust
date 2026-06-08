@@ -62,15 +62,30 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
     let endpoint = format!("{}:{}", host, port);
     state.log(LogLevel::Info, format!("Connecting to IB {endpoint} clientId={cid}…"));
 
-    let client = match Client::connect(&endpoint, cid) {
-        Ok(c) => c,
-        Err(e) => {
-            state.log(
-                LogLevel::Err,
-                format!("IB connection failed: {e}. Check Gateway/TWS is running with API enabled."),
-            );
-            state.running.store(false, Ordering::Relaxed);
+    // Auto-reconnect: keep retrying the IB connection while the operator has the engine
+    // running, rather than stopping on the first failure. A hands-off client should resume
+    // on its own when the Gateway/TWS comes back — and staying "running but disconnected"
+    // is what the disconnect-alert monitor watches for.
+    let client = loop {
+        if !state.is_running() {
             return;
+        }
+        match Client::connect(&endpoint, cid) {
+            Ok(c) => break c,
+            Err(e) => {
+                state.with_status(|s| s.connected = false);
+                state.log(
+                    LogLevel::Warn,
+                    format!("IB connection failed: {e}. Retrying in 15s (check Gateway/TWS API)."),
+                );
+                // Interruptible wait so STOP stays responsive.
+                for _ in 0..150 {
+                    if !state.is_running() {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
         }
     };
 
