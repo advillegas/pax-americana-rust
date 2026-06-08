@@ -24,17 +24,7 @@ slint::include_modules!();
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn main() {
-    // CPU/software rendering — works without a GPU/OpenGL (RDP/VPS friendly).
-    std::env::set_var("SLINT_BACKEND", "winit-software");
-
-    // Force an OPAQUE OS window. Slint's winit backend creates the window with
-    // `with_transparent(true)` by default; combined with the software renderer's partial
-    // (dirty-region) redraw, Windows can leave un-repainted areas showing through
-    // transparently — most visible on a mostly-static UI like this one. Selecting the
-    // backend with a non-transparent window attribute eliminates the see-through artifact.
-    let _ = slint::BackendSelector::new()
-        .with_winit_window_attributes_hook(|attrs| attrs.with_transparent(false))
-        .select();
+    init_opaque_software_backend();
 
     // Kill switch on launch: clear stale instances so they don't clog the port or hold
     // the TWS clientId. Wait long enough for the OS to release the socket + IB session.
@@ -130,6 +120,26 @@ fn main() {
     }
 
     ui.run().expect("failed to run GUI");
+}
+
+/// Initialize Slint with CPU/software rendering and an OPAQUE OS window.
+///
+/// Software rendering works without a GPU/OpenGL (RDP/VPS friendly). Critically, Slint's
+/// winit backend creates the window with `with_transparent(true)` by default; on Windows
+/// this transparent surface — combined with the software renderer's partial redraw — can
+/// leave the window (partly or wholly) see-through. Selecting the backend explicitly with
+/// a `with_transparent(false)` window attribute forces an opaque window and eliminates the
+/// artifact. If explicit selection fails for any reason, fall back to the env-var default
+/// so the GUI still launches.
+fn init_opaque_software_backend() {
+    let selected = slint::BackendSelector::new()
+        .backend_name("winit".into())
+        .renderer_name("software".into())
+        .with_winit_window_attributes_hook(|attrs| attrs.with_transparent(false))
+        .select();
+    if selected.is_err() {
+        std::env::set_var("SLINT_BACKEND", "winit-software");
+    }
 }
 
 fn recent_log(state: &SharedState) -> String {

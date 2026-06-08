@@ -32,13 +32,7 @@ slint::include_modules!();
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn main() {
-    std::env::set_var("SLINT_BACKEND", "winit-software");
-
-    // Force an OPAQUE OS window (Slint defaults to a transparent winit surface, which with
-    // the software renderer's partial redraw can leave see-through artifacts on Windows).
-    let _ = slint::BackendSelector::new()
-        .with_winit_window_attributes_hook(|attrs| attrs.with_transparent(false))
-        .select();
+    init_opaque_software_backend();
 
     kill_other_instances();
     std::thread::sleep(Duration::from_millis(1500));
@@ -510,6 +504,22 @@ fn spawn_detect_accounts(state: std::sync::Arc<SharedState>) {
             Err(e) => state.log(LogLevel::Warn, format!("Account detection failed: {e}")),
         }
     });
+}
+
+/// Initialize Slint with CPU/software rendering and an OPAQUE OS window (see the master's
+/// equivalent for the full rationale). Software rendering is RDP/VPS-friendly; forcing the
+/// window non-transparent eliminates the see-through artifact from Slint's default
+/// transparent winit surface under partial CPU redraws. Falls back to the env-var default
+/// if explicit selection fails, so the GUI always launches.
+fn init_opaque_software_backend() {
+    let selected = slint::BackendSelector::new()
+        .backend_name("winit".into())
+        .renderer_name("software".into())
+        .with_winit_window_attributes_hook(|attrs| attrs.with_transparent(false))
+        .select();
+    if selected.is_err() {
+        std::env::set_var("SLINT_BACKEND", "winit-software");
+    }
 }
 
 pub fn kill_other_instances() {
