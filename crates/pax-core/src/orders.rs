@@ -1,10 +1,10 @@
-//! Working-order mirroring: scale the master's resting limit/stop orders to the client,
-//! diff them against the client's existing mirrors, and fold *entry* orders into the
+//! Working-order replication: scale the source's resting limit/stop orders to the client,
+//! diff them against the client's existing resting orders, and fold *entry* orders into the
 //! effective position used by the reconciliation safety net.
 
 use std::collections::BTreeMap;
 
-use crate::model::{Position, Side, WorkingOrder};
+use crate::model::{OrderKind, Position, Side, WorkingOrder};
 use crate::sizing::{round_qty, SizingParams};
 
 /// Scale the master's working orders into the client's desired working orders.
@@ -77,21 +77,63 @@ pub struct WorkingDiff {
     pub to_cancel: Vec<String>,
 }
 
-/// Diff desired vs. currently-live client working orders by stable key.
-pub fn diff_working_orders(desired: &[WorkingOrder], current: &[WorkingOrder]) -> WorkingDiff {
-    let desired_keys: BTreeMap<String, ()> = desired.iter().map(|w| (w.key(), ())).collect();
-    let current_keys: BTreeMap<String, ()> = current.iter().map(|w| (w.key(), ())).collect();
+/// The price field that actually matters for an order of this kind.
+fn relevant_price(w: &WorkingOrder) -> f64 {
+    match w.kind {
+        OrderKind::Limit | OrderKind::StopLimit => w.limit_price,
+        OrderKind::Stop => w.aux_price,
+        OrderKind::Market => 0.0,
+    }
+}
 
-    let to_place = desired
-        .iter()
-        .filter(|w| !current_keys.contains_key(&w.key()))
-        .cloned()
-        .collect();
+/// Two orders are "the same resting order" if they share symbol/side/kind and their
+/// quantity and price are within tolerance. The tolerance absorbs the unavoidable churn
+/// sources — proportional-sizing quantity drift as balances tick, and IBKR price
+/// rounding/capping on read-back — so a matched book is NOT cancelled-and-replaced on
+/// every restart or balance wobble. A *material* change (real master re-size or re-price)
+/// still falls outside tolerance and triggers a proper replace.
+fn same_working_order(a: &WorkingOrder, b: &WorkingOrder) -> bool {
+    if a.symbol != b.symbol || a.side != b.side || a.kind != b.kind {
+        return false;
+    }
+    // Quantity: within 3% (or 1 share, whichever is larger).
+    let qmax = a.quantity.abs().max(b.quantity.abs());
+    let qty_tol = (qmax * 0.03).max(1.0);
+    if (a.quantity - b.quantity).abs() > qty_tol {
+        return false;
+    }
+    // Price: within 0.5% (or 1 cent, whichever is larger).
+    let (pa, pb) = (relevant_price(a), relevant_price(b));
+    let price_tol = (pb.abs() * 0.005).max(0.01);
+    (pa - pb).abs() <= price_tol
+}
+
+/// Diff desired vs. currently-live client working orders with TOLERANT matching.
+///
+/// An existing live order that already corresponds to a desired one (same symbol/side/kind,
+/// quantity and price within tolerance — see [`same_working_order`]) is left in place. Only
+/// desired orders with no live counterpart are placed, and only live orders with no desired
+/// counterpart are cancelled. This stops the restart/drift churn where exact-key matching
+/// cancelled and re-placed the entire resting book every cycle.
+pub fn diff_working_orders(desired: &[WorkingOrder], current: &[WorkingOrder]) -> WorkingDiff {
+    let mut used = vec![false; current.len()];
+    let mut to_place = Vec::new();
+
+    for d in desired {
+        // Find an as-yet-unmatched live order equivalent to this desired one.
+        match current.iter().enumerate().find(|(i, c)| !used[*i] && same_working_order(c, d)) {
+            Some((i, _)) => used[i] = true, // already satisfied — leave it untouched
+            None => to_place.push(d.clone()),
+        }
+    }
+
     let to_cancel = current
         .iter()
-        .filter(|w| !desired_keys.contains_key(&w.key()))
-        .map(|w| w.key())
+        .enumerate()
+        .filter(|(i, _)| !used[*i])
+        .map(|(_, c)| c.key())
         .collect();
+
     WorkingDiff { to_place, to_cancel }
 }
 
@@ -200,6 +242,38 @@ mod tests {
         let diff = diff_working_orders(&desired, &current);
         assert!(diff.to_place.is_empty());
         assert!(diff.to_cancel.is_empty());
+    }
+
+    /// Small quantity drift (balance wobble) must NOT cancel+replace — the cause of the
+    /// restart order flood. 1000 vs 1005 shares (0.5%) is within tolerance.
+    #[test]
+    fn diff_tolerates_small_qty_drift() {
+        let desired = vec![wo("AAPL", Side::Buy, 1005.0, true)];
+        let current = vec![wo("AAPL", Side::Buy, 1000.0, true)];
+        let diff = diff_working_orders(&desired, &current);
+        assert!(diff.to_place.is_empty(), "tiny qty drift must not re-place");
+        assert!(diff.to_cancel.is_empty(), "tiny qty drift must not cancel");
+    }
+
+    /// Tiny price drift (IBKR rounding/capping) must NOT churn. 100.00 vs 100.02 limit.
+    #[test]
+    fn diff_tolerates_tiny_price_drift() {
+        let mut d = wo("AAPL", Side::Buy, 100.0, true);
+        d.limit_price = 100.02;
+        let c = wo("AAPL", Side::Buy, 100.0, true); // limit_price 100.0
+        let diff = diff_working_orders(&[d], &[c]);
+        assert!(diff.to_place.is_empty());
+        assert!(diff.to_cancel.is_empty());
+    }
+
+    /// A MATERIAL change (real master re-size) still replaces: 1000 -> 2000 shares.
+    #[test]
+    fn diff_replaces_on_material_change() {
+        let desired = vec![wo("AAPL", Side::Buy, 2000.0, true)];
+        let current = vec![wo("AAPL", Side::Buy, 1000.0, true)];
+        let diff = diff_working_orders(&desired, &current);
+        assert_eq!(diff.to_place.len(), 1, "material qty change must place new");
+        assert_eq!(diff.to_cancel.len(), 1, "material qty change must cancel old");
     }
 
     #[test]
