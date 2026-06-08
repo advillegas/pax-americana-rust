@@ -3,8 +3,8 @@
 //! Without this, a restart resets the gate to empty, so the engine recomputes every target
 //! from the current balances and resizes the whole book on the next sync — the exact
 //! increase/decrease churn we want to avoid. By saving the locked fingerprint + targets +
-//! mirror orders, a restart resumes the SAME matched structure and only resizes if the
-//! master's ledger actually changed while the client was down.
+//! resting orders, a restart resumes the SAME matched structure and only resizes if the
+//! source ledger actually changed while the client was down.
 //!
 //! Stored as a hidden, obfuscated file under LocalAppData (see [`crate::appdata`]).
 
@@ -28,10 +28,10 @@ pub struct Ledger {
     pub seen_master_net: BTreeMap<String, f64>,
     /// Locked per-symbol signed target net quantities.
     pub targets: BTreeMap<String, f64>,
-    /// Signature of the master's resting orders at the last mirror re-sync.
+    /// Signature of the source's resting orders at the last re-sync.
     #[serde(default)]
     pub wo_fingerprint: Option<String>,
-    /// Locked desired mirror (resting) orders.
+    /// Locked desired resting orders.
     pub desired: Vec<WorkingOrder>,
 }
 

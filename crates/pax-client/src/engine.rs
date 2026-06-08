@@ -188,7 +188,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
     // against, per symbol. A target is only recomputed (with the then-current balances) when
     // THAT symbol's master net changes — so a move in one name, or a re-priced master order,
     // never re-sizes a symbol the master left untouched. `last_wo_fp` gates the resting-order
-    // mirror independently.
+    // replication independently.
     let (mut seen_master_net, mut locked_targets, mut last_wo_fp, mut locked_desired) =
         match crate::ledger::load(&account) {
             Some(l) => {
@@ -426,15 +426,15 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         };
         let long_only = controls.trade_mode == TradeMode::LongOnly;
 
-        // ── Master-change gate ────────────────────────────────────────────────
-        // Recompute the desired client structure (target net positions + mirrored working
-        // orders) ONLY when the master's ledger actually changes. Targets are sized
+        // ── Source-change gate ────────────────────────────────────────────────
+        // Recompute the desired client structure (target net positions + replicated working
+        // orders) ONLY when the source ledger actually changes. Targets are sized
         // proportionally to the CURRENT balances at that instant, then held — so a matched
         // book is never resized by mere balance/price drift (the source of commission bleed).
         if sizing.ratio().is_some() {
             let mut changed = false;
 
-            // Resting-order mirror: recompute only when the master's working orders change.
+            // Resting-order replication: recompute only when the source's working orders change.
             let wo_fp = working_orders_fingerprint(&snap.working_orders);
             if last_wo_fp.as_deref() != Some(wo_fp.as_str()) {
                 locked_desired =
@@ -483,11 +483,11 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             }
         }
 
-        // ── Channel 1: mirror the master's resting limit/stop orders ───────────
-        // `desired` is the LOCKED mirror set (recomputed only on master-ledger change above).
+        // ── Channel 1: replicate the source's resting limit/stop orders ─────────
+        // `desired` is the LOCKED working-order set (recomputed only on ledger change above).
         let desired = &locked_desired;
         // One read of ALL live orders (incl. in-flight market orders) drives both the
-        // mirror diff and the anti-stacking guard used by the market reconcile below.
+        // working-order diff and the anti-stacking guard used by the market reconcile below.
         let live_orders = ib::read_live_orders(&client, &account).unwrap_or_default();
         // Contracts/sides that already have one of OUR market orders working — never stack
         // a second market order on the same one (this is what trips IBKR error 201).
@@ -508,7 +508,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         for key in &wdiff.to_cancel {
             if let Some((id, w)) = current_working.iter().find(|(_, w)| &w.key() == key) {
                 match ib::cancel_order(&client, *id) {
-                    Ok(()) => state.log(LogLevel::Warn, format!("Cancel mirror order {} {}", w.side.as_ib(), w.symbol)),
+                    Ok(()) => state.log(LogLevel::Warn, format!("Cancel order {} {}", w.side.as_ib(), w.symbol)),
                     Err(e) => state.log(LogLevel::Err, format!("Cancel failed {}: {e}", w.symbol)),
                 }
             }
@@ -544,12 +544,12 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
                     let px = if w.kind == pax_core::OrderKind::Limit { w.limit_price } else { w.aux_price };
                     state.log(
                         lvl,
-                        format!("{:<4} {:<6} qty={:.0} {} @ {:.2} [mirror]", w.side.as_ib(), w.symbol, w.quantity, w.kind.as_ib(), px),
+                        format!("{:<4} {:<6} qty={:.0} {} @ {:.2}", w.side.as_ib(), w.symbol, w.quantity, w.kind.as_ib(), px),
                     );
                 }
                 Err(e) => {
                     state.with_status(|s| s.orders_failed += 1);
-                    state.log(LogLevel::Err, format!("Mirror order failed {}: {e}", w.symbol));
+                    state.log(LogLevel::Err, format!("Order failed {}: {e}", w.symbol));
                 }
             }
             thread::sleep(Duration::from_millis(250));
@@ -730,14 +730,14 @@ fn do_close_all(client: &Client, state: &Arc<SharedState>, account: &str) {
 /// confirmations), suppressed from the order feed to avoid noise.
 fn is_notice_noise(code: i32) -> bool {
     // 2161 = limit-order price-capped per IBKR's disruptive-order control (informational;
-    // the order still rests and works). Routine noise on the mirror channel.
+    // the order still rests and works). Routine noise on the working-order channel.
     matches!(code, 202 | 2100 | 2103 | 2104 | 2105 | 2106 | 2107 | 2108 | 2119 | 2150 | 2158 | 2161)
 }
 
 /// Balance-independent signature of the master's ledger (net positions + resting orders).
 /// It changes only when the master opens/closes/resizes a position or alters a working
 /// order — never on balance or price drift — so it gates exactly when the client re-syncs.
-/// Stable signature of just the master's resting orders, used to gate the mirror channel
+/// Stable signature of just the source's resting orders, used to gate the working-order channel
 /// (position targets are gated separately, per symbol).
 fn working_orders_fingerprint(working: &[WorkingOrder]) -> String {
     let mut parts: Vec<String> = working.iter().map(|w| w.key()).collect();

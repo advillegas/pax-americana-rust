@@ -161,7 +161,7 @@ pub struct LiveOrder {
 }
 
 impl LiveOrder {
-    /// View this live order as a [`WorkingOrder`] (used for the mirror diff). `is_entry`
+    /// View this live order as a [`WorkingOrder`] (used for the working-order diff). `is_entry`
     /// is not knowable from the order alone, so it is left false here.
     pub fn to_working(&self) -> WorkingOrder {
         WorkingOrder {
@@ -213,7 +213,7 @@ pub fn read_live_orders(client: &Client, account: &str) -> Result<Vec<LiveOrder>
 }
 
 /// Read this client's own resting limit/stop/stop-limit orders **for `account`**, paired
-/// with their order ids (so stale mirrors can be cancelled). Market orders are excluded —
+/// with their order ids (so stale ones can be cancelled). Market orders are excluded —
 /// use [`read_live_orders`] when in-flight market orders matter.
 pub fn read_open_orders(client: &Client, account: &str) -> Result<Vec<(i32, WorkingOrder)>, String> {
     Ok(read_live_orders(client, account)?

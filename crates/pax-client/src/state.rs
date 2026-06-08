@@ -21,7 +21,7 @@ pub enum TradeMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecutionMode {
-    /// Mirror the master's entire structure: open missing, close orphans, resize. This
+    /// Match the full target structure: open missing, close orphans, resize. This
     /// is the recommended mode and the one that fulfils full structural sync.
     ExistingPlusNew,
     /// Ignore positions the master already held when START was pressed; only act on
