@@ -3452,7 +3452,7 @@ checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
 
 [[package]]
 name = "pax-client"
-version = "2.0.6"
+version = "2.0.7"
 dependencies = [
  "anyhow",
  "ibapi",
@@ -3471,7 +3471,7 @@ dependencies = [
 
 [[package]]
 name = "pax-core"
-version = "2.0.6"
+version = "2.0.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -3480,7 +3480,7 @@ dependencies = [
 
 [[package]]
 name = "pax-master"
-version = "2.0.6"
+version = "2.0.7"
 dependencies = [
  "anyhow",
  "ibapi",

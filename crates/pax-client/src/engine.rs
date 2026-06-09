@@ -548,6 +548,15 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             }
         } else {
             for intent in &result.intents {
+                // Whole shares only: the IBKR API rejects fractional-sized orders (error
+                // 10243). Round DOWN to whole shares (never overshoot a close into the
+                // opposite side) and skip if there's no whole share to trade — otherwise a
+                // fractional remainder (e.g. a 0.4-share leftover from fractional trading)
+                // would be retried forever and just keep getting rejected.
+                let qty = (intent.qty + 1e-6).floor();
+                if qty < 1.0 {
+                    continue;
+                }
                 // Never stack a second market order on a contract/side that already has one
                 // of ours in flight — this is exactly what trips IBKR error 201.
                 if active_market_sides.contains(&(intent.symbol.clone(), intent.side)) {
@@ -562,7 +571,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
                 if is_opening(intent.reason)
                     && !open_allowed(
                         &client, state, &account, &intent.symbol, &intent.currency, &intent.exchange,
-                        intent.side, intent.qty, intent.kind, intent.limit_price, intent.aux_price,
+                        intent.side, qty, intent.kind, intent.limit_price, intent.aux_price,
                         &mut projected_available,
                     )
                 {
@@ -592,7 +601,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
                     &intent.currency,
                     &intent.exchange,
                     intent.side,
-                    intent.qty,
+                    qty,
                     intent.kind,
                     intent.limit_price,
                     intent.aux_price,
@@ -610,7 +619,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
                                 "{:<4} {:<6} qty={:.0} {} [{}]",
                                 intent.side.as_ib(),
                                 intent.symbol,
-                                intent.qty,
+                                qty,
                                 intent.kind.as_ib(),
                                 intent.reason.label()
                             ),
@@ -660,7 +669,12 @@ fn do_close_all(client: &Client, state: &Arc<SharedState>, account: &str) {
     }
     for p in &positions {
         let side = Side::closing(p.net_qty);
-        let qty = p.net_qty.abs();
+        // Whole shares only — the API rejects fractional orders (10243). A sub-share
+        // remainder simply can't be closed via the API, so skip it.
+        let qty = (p.net_qty.abs() + 1e-6).floor();
+        if qty < 1.0 {
+            continue;
+        }
         match ib::place_order(
             client,
             account,
