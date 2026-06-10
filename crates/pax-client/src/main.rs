@@ -63,7 +63,6 @@ fn main() {
         ui.set_account_mode(if c.account_mode == AccountMode::Live { 0 } else { 1 });
         ui.set_trade_mode(if c.trade_mode == TradeMode::LongOnly { 1 } else { 0 });
         ui.set_exec_mode(if c.execution_mode == ExecutionMode::NewOnly { 1 } else { 0 });
-        ui.set_hours_mode(if c.rth_only { 1 } else { 0 });
         ui.set_multiplier(format!("{:.1}", c.multiplier).into());
         ui.set_drawdown(format!("{:.1}", c.max_drawdown_pct).into());
         ui.set_host(c.ib_host.clone().into());
@@ -382,7 +381,6 @@ fn apply_settings(ui: &ClientWindow, state: &SharedState) {
     c.account_mode = if ui.get_account_mode() == 0 { AccountMode::Live } else { AccountMode::Paper };
     c.trade_mode = if ui.get_trade_mode() == 1 { TradeMode::LongOnly } else { TradeMode::LongShort };
     c.execution_mode = if ui.get_exec_mode() == 1 { ExecutionMode::NewOnly } else { ExecutionMode::ExistingPlusNew };
-    c.rth_only = ui.get_hours_mode() == 1;
     if let Ok(v) = ui.get_multiplier().trim().parse::<f64>() {
         c.multiplier = v.clamp(0.1, 5.0);
     }

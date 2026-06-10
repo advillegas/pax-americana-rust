@@ -98,7 +98,6 @@ export component ClientWindow inherits Window {
     in-out property <int> account_mode;    // 0 live, 1 paper
     in-out property <int> trade_mode;      // 0 long&short, 1 long only
     in-out property <int> exec_mode;       // 0 existing+new, 1 new only
-    in-out property <int> hours_mode;      // 0 = 24h, 1 = regular trading hours only
     in-out property <string> multiplier;
     in-out property <string> drawdown;
     in-out property <string> host;
@@ -227,10 +226,6 @@ export component ClientWindow inherits Window {
                 Text { text: "Execution"; color: #909fb7; width: 70px; vertical-alignment: center; }
                 Segment { label: "Existing + New"; active: root.exec_mode == 0; width: 130px; clicked => { root.exec_mode = 0; } }
                 Segment { label: "New Only"; active: root.exec_mode == 1; width: 100px; clicked => { root.exec_mode = 1; } }
-                Rectangle { width: 12px; }
-                Text { text: "Hours"; color: #909fb7; width: 46px; vertical-alignment: center; }
-                Segment { label: "24h"; active: root.hours_mode == 0; width: 60px; clicked => { root.hours_mode = 0; } }
-                Segment { label: "RTH only"; active: root.hours_mode == 1; width: 90px; clicked => { root.hours_mode = 1; } }
                 Rectangle { }
             }
             HorizontalLayout {

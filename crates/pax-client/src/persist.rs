@@ -24,9 +24,6 @@ struct Persisted {
     ib_port_live: u16,
     ib_port_paper: u16,
     ib_account: String,
-    /// Default false so older settings (without this key) keep 24h behavior.
-    #[serde(default)]
-    rth_only: bool,
 }
 
 fn apply(c: &mut Controls, ps: Persisted) {
@@ -39,7 +36,6 @@ fn apply(c: &mut Controls, ps: Persisted) {
     c.ib_port_live = ps.ib_port_live;
     c.ib_port_paper = ps.ib_port_paper;
     c.ib_account = ps.ib_account;
-    c.rth_only = ps.rth_only;
 }
 
 /// Overlay saved settings onto `c` (called at startup, after env/config defaults).
@@ -74,7 +70,6 @@ pub fn save(c: &Controls) {
         ib_port_live: c.ib_port_live,
         ib_port_paper: c.ib_port_paper,
         ib_account: c.ib_account.clone(),
-        rth_only: c.rth_only,
     };
     if let Ok(bytes) = serde_json::to_vec(&ps) {
         appdata::write(FILE, bytes);

@@ -431,16 +431,18 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
 
         let controls = state.controls.lock().clone();
 
-        // Off-hours guard: when RTH-only is enabled, place no orders outside US equity
-        // regular trading hours. We keep status/positions/master updated above, but skip
-        // the trading channels AND the master-change gate, so a master move during the
-        // close is synced when the session reopens (not lost, not acted on off-hours).
-        if controls.rth_only && !crate::market_hours::is_us_equity_rth_now() {
+        // Regular-trading-hours gate. Every order this build places is a MARKET order, and
+        // market orders can only execute during US equity RTH (09:30–16:00 ET) — outside
+        // that window IBKR rejects/queues them ("inactive" / notice 399) and the engine
+        // would just retry into a rejection storm. So outside RTH we hold: status,
+        // positions and target tracking stay live, and the book is synced when the session
+        // opens (a move during the close is not lost, just deferred to the open).
+        if !crate::market_hours::is_us_equity_rth_now() {
             let warn = last_offhours_log
                 .map(|t| t.elapsed() > Duration::from_secs(300))
                 .unwrap_or(true);
             if warn {
-                state.log(LogLevel::Info, "Outside regular trading hours — holding (RTH-only).".to_string());
+                state.log(LogLevel::Info, "Outside regular trading hours — holding until the open.".to_string());
                 last_offhours_log = Some(Instant::now());
             }
             sleep_running(cfg.sync_interval_secs, state);
