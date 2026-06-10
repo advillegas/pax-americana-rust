@@ -9,7 +9,6 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod alert;
 mod appdata;
 mod config;
 mod data;
@@ -54,7 +53,6 @@ fn main() {
 
     engine::spawn(cfg.clone(), state.clone());
     data::spawn(cfg.clone(), state.clone());
-    alert::spawn(state.clone());
     spawn_update_check(state.clone());
     spawn_detect_accounts(state.clone());
 
@@ -72,14 +70,6 @@ fn main() {
         ui.set_live_port(c.ib_port_live.to_string().into());
         ui.set_paper_port(c.ib_port_paper.to_string().into());
         ui.set_account(c.ib_account.clone().into());
-        ui.set_alerts_enabled(c.alerts_enabled);
-        ui.set_alert_email(c.alert_email.clone().into());
-        ui.set_alert_hours(format!("{:.1}", c.alert_after_hours).into());
-        ui.set_smtp_host(c.smtp_host.clone().into());
-        ui.set_smtp_port(c.smtp_port.to_string().into());
-        ui.set_smtp_user(c.smtp_user.clone().into());
-        ui.set_smtp_pass(c.smtp_pass.clone().into());
-        ui.set_smtp_from(c.smtp_from.clone().into());
     }
 
     {
@@ -233,14 +223,6 @@ fn main() {
         });
     }
 
-    {
-        let state = state.clone();
-        ui.on_test_alert(move || {
-            state.alert_test.store(true, std::sync::atomic::Ordering::Relaxed);
-            *state.alert_status.lock() = "Sending test…".to_string();
-        });
-    }
-
     let timer = slint::Timer::default();
     {
         let state = state.clone();
@@ -296,7 +278,6 @@ fn main() {
                 ui.set_update_text(u.message.clone().into());
                 ui.set_update_available(u.available);
             }
-            ui.set_alert_status(state.alert_status.lock().clone().into());
             // ── Portfolio table (rebuild only when the data changed) ──────────
             ui.set_data_connected(state.data_connected.load(std::sync::atomic::Ordering::Relaxed));
             {
@@ -419,19 +400,6 @@ fn apply_settings(ui: &ClientWindow, state: &SharedState) {
         c.ib_port_paper = v;
     }
     c.ib_account = ui.get_account().trim().to_string();
-    // Disconnect alerts.
-    c.alerts_enabled = ui.get_alerts_enabled();
-    c.alert_email = ui.get_alert_email().trim().to_string();
-    if let Ok(v) = ui.get_alert_hours().trim().parse::<f64>() {
-        c.alert_after_hours = v.max(0.0);
-    }
-    c.smtp_host = ui.get_smtp_host().trim().to_string();
-    if let Ok(v) = ui.get_smtp_port().trim().parse::<u16>() {
-        c.smtp_port = v;
-    }
-    c.smtp_user = ui.get_smtp_user().trim().to_string();
-    c.smtp_pass = ui.get_smtp_pass().to_string();
-    c.smtp_from = ui.get_smtp_from().trim().to_string();
     persist::save(&c);
 }
 

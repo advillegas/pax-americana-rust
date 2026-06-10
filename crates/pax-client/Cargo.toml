@@ -16,9 +16,6 @@ parking_lot = { workspace = true }
 ureq = { workspace = true }
 ibapi = { workspace = true }
 slint = { version = "1.16", default-features = false, features = ["compat-1-2", "std", "backend-winit", "renderer-software", "unstable-winit-030"] }
-# SMTP for disconnect alerts. native-tls uses Windows SChannel (no OpenSSL/NASM build deps),
-# so the standalone exe stays self-contained.
-lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "native-tls", "builder", "hostname"] }
 
 [build-dependencies]
 slint-build = "1.16"

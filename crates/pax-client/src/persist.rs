@@ -27,29 +27,6 @@ struct Persisted {
     /// Default false so older settings (without this key) keep 24h behavior.
     #[serde(default)]
     rth_only: bool,
-    #[serde(default)]
-    alerts_enabled: bool,
-    #[serde(default)]
-    alert_email: String,
-    #[serde(default = "default_alert_hours")]
-    alert_after_hours: f64,
-    #[serde(default)]
-    smtp_host: String,
-    #[serde(default = "default_smtp_port")]
-    smtp_port: u16,
-    #[serde(default)]
-    smtp_user: String,
-    #[serde(default)]
-    smtp_pass: String,
-    #[serde(default)]
-    smtp_from: String,
-}
-
-fn default_alert_hours() -> f64 {
-    2.0
-}
-fn default_smtp_port() -> u16 {
-    587
 }
 
 fn apply(c: &mut Controls, ps: Persisted) {
@@ -63,14 +40,6 @@ fn apply(c: &mut Controls, ps: Persisted) {
     c.ib_port_paper = ps.ib_port_paper;
     c.ib_account = ps.ib_account;
     c.rth_only = ps.rth_only;
-    c.alerts_enabled = ps.alerts_enabled;
-    c.alert_email = ps.alert_email;
-    c.alert_after_hours = ps.alert_after_hours;
-    c.smtp_host = ps.smtp_host;
-    c.smtp_port = ps.smtp_port;
-    c.smtp_user = ps.smtp_user;
-    c.smtp_pass = ps.smtp_pass;
-    c.smtp_from = ps.smtp_from;
 }
 
 /// Overlay saved settings onto `c` (called at startup, after env/config defaults).
@@ -106,14 +75,6 @@ pub fn save(c: &Controls) {
         ib_port_paper: c.ib_port_paper,
         ib_account: c.ib_account.clone(),
         rth_only: c.rth_only,
-        alerts_enabled: c.alerts_enabled,
-        alert_email: c.alert_email.clone(),
-        alert_after_hours: c.alert_after_hours,
-        smtp_host: c.smtp_host.clone(),
-        smtp_port: c.smtp_port,
-        smtp_user: c.smtp_user.clone(),
-        smtp_pass: c.smtp_pass.clone(),
-        smtp_from: c.smtp_from.clone(),
     };
     if let Ok(bytes) = serde_json::to_vec(&ps) {
         appdata::write(FILE, bytes);
