@@ -88,6 +88,12 @@ pub struct UpdateStatus {
 
 pub struct SharedState {
     pub snapshot: Mutex<MasterSnapshot>,
+    /// Pre-serialized JSON of `snapshot`, rebuilt once per publish by the (single) IB
+    /// worker. HTTP handlers serve this directly so they never serialize per request —
+    /// the snapshot lock is held only long enough to clone the Arc (a refcount bump),
+    /// never during JSON encoding. Kept in lockstep with `snapshot` via `publish_snapshot`
+    /// / `mark_offline` (only the IB worker writes either, so they can't diverge).
+    pub snapshot_json: Mutex<Arc<String>>,
     pub log: Mutex<LogBuffer>,
     /// GUI-editable connection params; the IB worker reads them on (re)connect.
     pub conn: Mutex<ConnParams>,
@@ -99,8 +105,11 @@ pub struct SharedState {
 
 impl SharedState {
     pub fn new(host: String, port_live: u16, port_paper: u16, start_mode: IbMode) -> Arc<Self> {
+        let snap0 = MasterSnapshot::default();
+        let json0 = Arc::new(snap0.to_json());
         Arc::new(SharedState {
-            snapshot: Mutex::new(MasterSnapshot::default()),
+            snapshot: Mutex::new(snap0),
+            snapshot_json: Mutex::new(json0),
             log: Mutex::new(LogBuffer::default()),
             conn: Mutex::new(ConnParams {
                 host,
@@ -128,6 +137,32 @@ impl SharedState {
 
     pub fn log(&self, level: LogLevel, msg: impl Into<String>) {
         self.log.lock().push(level, msg);
+    }
+
+    /// Publish a new snapshot AND its serialized JSON together. Serialization happens here
+    /// (once per update, on the IB worker) rather than per HTTP request.
+    pub fn publish_snapshot(&self, snap: MasterSnapshot) {
+        let json = Arc::new(snap.to_json());
+        *self.snapshot.lock() = snap;
+        *self.snapshot_json.lock() = json;
+    }
+
+    /// Flip the feed to offline (connected=false) while keeping the last positions, and
+    /// refresh the cached JSON so clients immediately read the standby state. Used during
+    /// the position-replay window and on disconnect.
+    pub fn mark_offline(&self) {
+        let snap = {
+            let mut s = self.snapshot.lock();
+            s.connected = false;
+            s.generated_at_ms = now_ms();
+            s.clone()
+        };
+        *self.snapshot_json.lock() = Arc::new(snap.to_json());
+    }
+
+    /// Cheap read for HTTP handlers: clone the Arc (refcount bump), no serialization.
+    pub fn snapshot_json(&self) -> Arc<String> {
+        self.snapshot_json.lock().clone()
     }
 }
 

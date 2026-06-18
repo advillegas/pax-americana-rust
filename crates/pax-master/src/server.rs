@@ -67,7 +67,9 @@ fn handle(request: tiny_http::Request, state: &SharedState, api_key: &str) {
     }
 
     let body = match path {
-        "/snapshot" | "/positions" => state.snapshot.lock().to_json(),
+        // Serve the pre-serialized snapshot JSON (cached by the IB worker). The lock is held
+        // only to clone the Arc; no per-request serialization happens here.
+        "/snapshot" | "/positions" => (*state.snapshot_json()).clone(),
         "/balance" => {
             let snap = state.snapshot.lock();
             format!(r#"{{"balance":{},"connected":{}}}"#, snap.balance, snap.connected)

@@ -165,32 +165,29 @@ fn worker_loop(cfg: MasterConfig, state: Arc<SharedState>, stop: Arc<AtomicBool>
                 last_orders = Instant::now();
             }
 
-            // Republish the snapshot (cheap; keeps liveness timestamp fresh).
-            {
-                let mut snap = state.snapshot.lock();
-                if replay_complete {
-                    *snap = MasterSnapshot {
-                        schema: PROTOCOL_SCHEMA,
-                        connected: true,
-                        account: account.clone(),
-                        balance,
-                        positions: book.values().cloned().collect(),
-                        working_orders: working.clone(),
-                        generated_at_ms: now_ms(),
-                    };
-                } else {
-                    // Replay still arriving — DO NOT publish a partial book. Hold as
-                    // "syncing" (connected=false) so clients stand by; leave the previous
-                    // positions untouched rather than broadcasting an incomplete set.
-                    snap.connected = false;
-                    snap.generated_at_ms = now_ms();
-                    if !warned_slow_replay && connect_instant.elapsed() > Duration::from_secs(15) {
-                        warned_slow_replay = true;
-                        state.log(
-                            LogLevel::Warn,
-                            "Position sync is taking longer than usual — holding broadcast until complete.".to_string(),
-                        );
-                    }
+            // Republish the snapshot. publish_snapshot serializes the JSON once here (on
+            // this worker), so HTTP handlers never serialize per request.
+            if replay_complete {
+                state.publish_snapshot(MasterSnapshot {
+                    schema: PROTOCOL_SCHEMA,
+                    connected: true,
+                    account: account.clone(),
+                    balance,
+                    positions: book.values().cloned().collect(),
+                    working_orders: working.clone(),
+                    generated_at_ms: now_ms(),
+                });
+            } else {
+                // Replay still arriving — DO NOT publish a partial book. Hold as "syncing"
+                // (connected=false) so clients stand by; keep the previous positions rather
+                // than broadcasting an incomplete set.
+                state.mark_offline();
+                if !warned_slow_replay && connect_instant.elapsed() > Duration::from_secs(15) {
+                    warned_slow_replay = true;
+                    state.log(
+                        LogLevel::Warn,
+                        "Position sync is taking longer than usual — holding broadcast until complete.".to_string(),
+                    );
                 }
             }
 
@@ -203,9 +200,7 @@ fn worker_loop(cfg: MasterConfig, state: Arc<SharedState>, stop: Arc<AtomicBool>
 }
 
 fn mark_disconnected(state: &SharedState) {
-    let mut snap = state.snapshot.lock();
-    snap.connected = false;
-    snap.generated_at_ms = now_ms();
+    state.mark_offline();
 }
 
 /// Read NetLiquidation (USD) via an account-summary request. The tag is passed as a
