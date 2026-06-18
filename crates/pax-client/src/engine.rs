@@ -168,6 +168,8 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
     let order_stream = client.order_update_stream().ok();
 
     let mut cooldown: HashMap<String, Instant> = HashMap::new();
+    // Previous poll's source position count, for the partial-feed (flap) guard below.
+    let mut prev_master_pos_count: Option<usize> = None;
     // Order id → (symbol, side) for orders we placed, so async status updates (fills /
     // rejections) can be attributed back to a contract and side.
     let mut placed_orders: HashMap<i32, (String, Side)> = HashMap::new();
@@ -423,6 +425,28 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
                 continue;
             }
         };
+
+        // ── Partial-feed (flap) guard — defense in depth ──────────────────────
+        // If the source's position count collapses versus the previous poll (a partial or
+        // flapping feed), acting on it would mass-close the "missing" symbols and re-open
+        // them next poll — exactly the churn we must never produce. Skip such a snapshot.
+        // It self-heals: the baseline is updated, so a genuine, sustained reduction is
+        // applied on the very next cycle (only a >50% single-poll drop is ever deferred).
+        {
+            let now_count = snap.positions.len();
+            if let Some(prev) = prev_master_pos_count {
+                if prev >= 5 && now_count * 2 < prev {
+                    state.log(
+                        LogLevel::Warn,
+                        format!("Ignoring incomplete sync ({now_count} vs {prev} positions) — holding this cycle."),
+                    );
+                    prev_master_pos_count = Some(now_count);
+                    sleep_running(cfg.sync_interval_secs, state);
+                    continue;
+                }
+            }
+            prev_master_pos_count = Some(now_count);
+        }
 
         // Capture the server's starting structure once per session for New-Only mode.
         if baseline_symbols.is_none() {

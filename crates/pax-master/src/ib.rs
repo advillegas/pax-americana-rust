@@ -84,6 +84,14 @@ fn worker_loop(cfg: MasterConfig, state: Arc<SharedState>, stop: Arc<AtomicBool>
         let mut last_orders = Instant::now()
             .checked_sub(Duration::from_millis(ORDERS_REFRESH_MS))
             .unwrap_or_else(Instant::now);
+        // The streaming subscription first REPLAYS the full position set, then sends live
+        // updates. We must NOT broadcast a partial book during that replay: clients would
+        // read the not-yet-replayed symbols as closed and churn (mass close → re-open) on
+        // every reconnect. Hold the broadcast (connected=false → clients stand by) until
+        // PositionEnd marks the replay complete.
+        let mut replay_complete = false;
+        let connect_instant = Instant::now();
+        let mut warned_slow_replay = false;
 
         // Steady-state event loop.
         loop {
@@ -121,7 +129,17 @@ fn worker_loop(cfg: MasterConfig, state: Arc<SharedState>, stop: Arc<AtomicBool>
                             );
                         }
                     }
-                    PositionUpdate::PositionEnd => {} // end of initial replay; updates follow
+                    PositionUpdate::PositionEnd => {
+                        // Initial replay finished — the book is now complete and safe to
+                        // broadcast. Live incremental updates continue after this.
+                        if !replay_complete {
+                            replay_complete = true;
+                            state.log(
+                                LogLevel::Ok,
+                                format!("Positions synced ({} held) — broadcasting to clients.", book.len()),
+                            );
+                        }
+                    }
                 }
             }
 
@@ -150,15 +168,30 @@ fn worker_loop(cfg: MasterConfig, state: Arc<SharedState>, stop: Arc<AtomicBool>
             // Republish the snapshot (cheap; keeps liveness timestamp fresh).
             {
                 let mut snap = state.snapshot.lock();
-                *snap = MasterSnapshot {
-                    schema: PROTOCOL_SCHEMA,
-                    connected: true,
-                    account: account.clone(),
-                    balance,
-                    positions: book.values().cloned().collect(),
-                    working_orders: working.clone(),
-                    generated_at_ms: now_ms(),
-                };
+                if replay_complete {
+                    *snap = MasterSnapshot {
+                        schema: PROTOCOL_SCHEMA,
+                        connected: true,
+                        account: account.clone(),
+                        balance,
+                        positions: book.values().cloned().collect(),
+                        working_orders: working.clone(),
+                        generated_at_ms: now_ms(),
+                    };
+                } else {
+                    // Replay still arriving — DO NOT publish a partial book. Hold as
+                    // "syncing" (connected=false) so clients stand by; leave the previous
+                    // positions untouched rather than broadcasting an incomplete set.
+                    snap.connected = false;
+                    snap.generated_at_ms = now_ms();
+                    if !warned_slow_replay && connect_instant.elapsed() > Duration::from_secs(15) {
+                        warned_slow_replay = true;
+                        state.log(
+                            LogLevel::Warn,
+                            "Position sync is taking longer than usual — holding broadcast until complete.".to_string(),
+                        );
+                    }
+                }
             }
 
             thread::sleep(Duration::from_millis(REPUBLISH_MS));
