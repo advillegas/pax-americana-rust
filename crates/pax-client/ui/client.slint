@@ -142,6 +142,7 @@ export component ClientWindow inherits Window {
     callback start();
     callback stop();
     callback close_all();
+    callback reset_drawdown();
     callback save();
     callback kill();
     callback check_update();
@@ -205,6 +206,7 @@ export component ClientWindow inherits Window {
                 PaxButton { label: root.running ? "▶ RUNNING" : "▶ START"; fill: #34d399; width: 120px; clicked => { root.start(); } }
                 PaxButton { label: "■ STOP"; fill: #fb5d6e; width: 100px; clicked => { root.stop(); } }
                 PaxButton { label: "CLOSE ALL"; fill: #f5b454; width: 120px; clicked => { root.close_all(); } }
+                PaxButton { label: "RESET DRAWDOWN"; fill: #5b8def; width: 165px; clicked => { root.reset_drawdown(); } }
                 PaxButton { label: "KILL OTHERS"; fill: #c97a3f; width: 130px; clicked => { root.kill(); } }
                 Rectangle { }
             }

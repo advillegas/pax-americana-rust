@@ -9,10 +9,108 @@ use ibapi::contracts::Contract;
 use ibapi::orders::{Action, Order, Orders, PlaceOrder};
 use pax_core::{OrderKind, Position, Side, WorkingOrder};
 
+use crate::state::{AccountMode, LogLevel};
+
+/// Host + ports + mode used to locate a local IB Gateway / TWS listener.
+#[derive(Debug, Clone)]
+pub struct IbConnectParams {
+    pub host: String,
+    pub mode: AccountMode,
+    pub port_live: u16,
+    pub port_paper: u16,
+}
+
+/// Ports to probe, in order: the selected mode's port first, then the other configured
+/// port, then the standard TWS/Gateway defaults. Deduplicated; zero ports skipped.
+fn port_candidates(params: &IbConnectParams) -> Vec<(u16, &'static str)> {
+    let mut out: Vec<(u16, &'static str)> = Vec::new();
+    let mut push = |p: u16, label: &'static str| {
+        if p != 0 && !out.iter().any(|(q, _)| *q == p) {
+            out.push((p, label));
+        }
+    };
+    match params.mode {
+        AccountMode::Live => {
+            push(params.port_live, "live");
+            push(params.port_paper, "paper");
+        }
+        AccountMode::Paper => {
+            push(params.port_paper, "paper");
+            push(params.port_live, "live");
+        }
+    }
+    push(7496, "TWS live");
+    push(7497, "TWS paper");
+    push(4001, "Gateway live");
+    push(4002, "Gateway paper");
+    out
+}
+
+/// Probe IB endpoints until one accepts the API handshake. A refused port is abandoned
+/// immediately (nothing is listening); other errors are logged and the next port is tried.
+pub fn connect_with_fallback<F, S>(
+    params: &IbConnectParams,
+    client_id: i32,
+    mut log: F,
+    should_stop: S,
+) -> Option<Client>
+where
+    F: FnMut(LogLevel, String),
+    S: Fn() -> bool,
+{
+    for (port, label) in port_candidates(params) {
+        if should_stop() {
+            return None;
+        }
+        let endpoint = format!("{}:{}", params.host, port);
+        match Client::connect(&endpoint, client_id) {
+            Ok(c) => {
+                log(
+                    LogLevel::Ok,
+                    format!("IB connected on {endpoint} [{label}] clientId={client_id}"),
+                );
+                return Some(c);
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                // A refused port just means nothing is listening there — the expected case
+                // while the Gateway is down. Skip to the next port silently so a long
+                // reconnect wait (e.g. overnight) doesn't flood the log with one line per
+                // port per retry; the caller logs a single periodic summary instead.
+                if msg.contains("refused") || msg.contains("10061") {
+                    continue;
+                }
+                // A non-refusal (handshake / clientId-in-use / protocol) is worth surfacing.
+                log(
+                    LogLevel::Warn,
+                    format!("IB connect issue on {endpoint} [{label}] clientId={client_id}: {e}"),
+                );
+            }
+        }
+    }
+    None
+}
+
 /// Connect briefly to the local IB Gateway/TWS and return the accounts this login
 /// manages — used to populate the GUI account picker. The connection drops on return.
 pub fn list_accounts(endpoint: &str, client_id: i32) -> Result<Vec<String>, String> {
     let client = Client::connect(endpoint, client_id).map_err(|e| e.to_string())?;
+    let mut accts = client.managed_accounts().map_err(|e| e.to_string())?;
+    accts.retain(|a| !a.trim().is_empty());
+    Ok(accts)
+}
+
+/// Like [`list_accounts`], but probes ports the same way the trading engine does.
+pub fn list_accounts_with_fallback<F>(
+    params: &IbConnectParams,
+    client_id: i32,
+    mut log: F,
+) -> Result<Vec<String>, String>
+where
+    F: FnMut(LogLevel, String),
+{
+    let client = connect_with_fallback(params, client_id, &mut log, || false)
+        .ok_or_else(|| "no reachable IB endpoint — check Gateway/TWS is running with API enabled".to_string())?;
     let mut accts = client.managed_accounts().map_err(|e| e.to_string())?;
     accts.retain(|a| !a.trim().is_empty());
     Ok(accts)

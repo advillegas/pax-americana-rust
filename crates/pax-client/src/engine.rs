@@ -34,58 +34,106 @@ pub fn spawn(cfg: ClientConfig, state: Arc<SharedState>) {
 }
 
 fn engine_main(cfg: ClientConfig, state: Arc<SharedState>) {
+    // Set once we've verified the license at least once this process-run. Used so a
+    // transient license-endpoint hiccup on a *reconnect* doesn't abandon a licensed
+    // account's open trades (a real revocation still returns Denied and stops).
+    let ever_authorized = std::sync::atomic::AtomicBool::new(false);
     loop {
         // Idle until the operator starts the engine.
         while !state.is_running() {
             thread::sleep(Duration::from_millis(200));
         }
-        run_session(&cfg, &state);
+        // Capture the session generation so START (which bumps it) cleanly ends this
+        // session and forces a fresh one — never resuming a stale, halted session.
+        let my_gen = state.session_gen.load(Ordering::Relaxed);
+        let session_start = Instant::now();
+        // Run the session under catch_unwind so an unexpected panic in one cycle can NEVER
+        // permanently kill the engine thread (which would leave START dead and force a full
+        // app restart — exactly the "can't restart" failure). parking_lot mutexes don't
+        // poison on unwind, so recovering and starting a new session is safe.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_session(&cfg, &state, &ever_authorized, my_gen);
+        }));
+        if outcome.is_err() {
+            state.log(
+                LogLevel::Err,
+                "Engine hit an unexpected error and was contained — press START to resume.",
+            );
+            // Drop out of the running state so the operator can cleanly restart.
+            state.running.store(false, Ordering::Relaxed);
+        }
         // Session ended; reflect disconnection and loop back to idle/reconnect.
         state.with_status(|s| {
             s.connected = false;
         });
+
+        // Throttle rapid AUTO-reconnects: if the link flaps (a session that connected then
+        // dropped within a few seconds), pad to a minimum interval so we don't spin —
+        // hammering IB and the license endpoint — on a genuinely unstable connection. A
+        // clean STOP (not running) and a user restart (session superseded by a new START)
+        // are NOT throttled, so the operator never waits on their own action.
+        let superseded = state.session_gen.load(Ordering::Relaxed) != my_gen;
+        if state.is_running() && !superseded {
+            let min_gap = Duration::from_secs(5);
+            while session_start.elapsed() < min_gap {
+                if !state.is_running() || state.session_gen.load(Ordering::Relaxed) != my_gen {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
     }
 }
 
-fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
+fn run_session(
+    cfg: &ClientConfig,
+    state: &Arc<SharedState>,
+    ever_authorized: &std::sync::atomic::AtomicBool,
+    my_gen: u64,
+) {
     let (account_mode, host, port_live, port_paper, master_url) = {
         let c = state.controls.lock();
         (c.account_mode, c.ib_host.clone(), c.ib_port_live, c.ib_port_paper, c.master_url.clone())
     };
     let api = MasterApi::new(&master_url, &cfg.master_api_key);
     state.log(LogLevel::Info, "Connecting…".to_string());
-    let port = match account_mode {
-        AccountMode::Live => port_live,
-        AccountMode::Paper => port_paper,
-    };
     let cid = stable_client_id();
-    let endpoint = format!("{}:{}", host, port);
-    state.log(LogLevel::Info, format!("Connecting to IB {endpoint} clientId={cid}…"));
+    let ib_params = ib::IbConnectParams {
+        host,
+        mode: account_mode,
+        port_live,
+        port_paper,
+    };
+    state.log(LogLevel::Info, format!("Connecting to IB (clientId={cid})…"));
 
     // Auto-reconnect: keep retrying the IB connection while the operator has the engine
     // running, rather than stopping on the first failure. A hands-off client should resume
-    // on its own when the Gateway/TWS comes back — and staying "running but disconnected"
-    // is what the disconnect-alert monitor watches for.
+    // on its own when the Gateway/TWS comes back.
     let client = loop {
         if !state.is_running() {
             return;
         }
-        match Client::connect(&endpoint, cid) {
-            Ok(c) => break c,
-            Err(e) => {
-                state.with_status(|s| s.connected = false);
-                state.log(
-                    LogLevel::Warn,
-                    format!("IB connection failed: {e}. Retrying in 15s (check Gateway/TWS API)."),
-                );
-                // Interruptible wait so STOP stays responsive.
-                for _ in 0..150 {
-                    if !state.is_running() {
-                        return;
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                }
+        let st = state.clone();
+        if let Some(c) = ib::connect_with_fallback(
+            &ib_params,
+            cid,
+            |level, msg| st.log(level, msg),
+            || !state.is_running(),
+        ) {
+            break c;
+        }
+        state.with_status(|s| s.connected = false);
+        state.log(
+            LogLevel::Warn,
+            "No reachable IB endpoint — check Gateway/TWS is running with API enabled. Retrying in 15s…"
+                .to_string(),
+        );
+        // Interruptible wait so STOP stays responsive.
+        for _ in 0..150 {
+            if !state.is_running() {
+                return;
             }
+            thread::sleep(Duration::from_millis(100));
         }
     };
 
@@ -147,7 +195,10 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
 
     // ── license gate ─────────────────────────────────────────────────────────
     match license::check(&account) {
-        LicenseStatus::Authorized => state.log(LogLevel::Ok, "License verified ✓"),
+        LicenseStatus::Authorized => {
+            ever_authorized.store(true, Ordering::Relaxed);
+            state.log(LogLevel::Ok, "License verified ✓");
+        }
         LicenseStatus::Denied => {
             state.log(
                 LogLevel::Err,
@@ -157,9 +208,20 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             return;
         }
         LicenseStatus::Unknown => {
-            state.log(LogLevel::Err, "Could not verify license (endpoint unreachable). Stopping.");
-            state.running.store(false, Ordering::Relaxed);
-            return;
+            // On a RECONNECT (already verified earlier this run) a transient inability to
+            // reach the license endpoint must NOT abandon the account's open trades — keep
+            // managing and let the 60s in-loop re-check stop only on an actual revocation.
+            // On a COLD start with no prior verification, stay strict and refuse to run.
+            if ever_authorized.load(Ordering::Relaxed) {
+                state.log(
+                    LogLevel::Warn,
+                    "License endpoint unreachable on reconnect — continuing (verified earlier this session).",
+                );
+            } else {
+                state.log(LogLevel::Err, "Could not verify license (endpoint unreachable). Stopping.");
+                state.running.store(false, Ordering::Relaxed);
+                return;
+            }
         }
     }
     let mut last_license = Instant::now();
@@ -183,6 +245,10 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
     let mut drawdown_hit = false;
     // M1: running peak equity (high-water mark) for a true max-drawdown control.
     let mut peak_balance = baseline;
+    // Consecutive cycles the drawdown threshold has been breached. The halt trips only
+    // after several in a row so a single glitchy / partial balance read (common during a
+    // flaky link or the order churn that precedes a stop-out) can't false-trip it.
+    let mut dd_breaches: u32 = 0;
     let mut last_unreachable_warn: Option<Instant> = None;
     let mut last_margin_warn: Option<Instant> = None;
     let mut last_offhours_log: Option<Instant> = None;
@@ -206,22 +272,31 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
     // replication independently.
     // `last_wo_fp` / `locked_desired` are retained only to round-trip older ledgers; this
     // positions-only build no longer replicates resting orders, so they are never updated.
-    let (mut seen_master_net, mut locked_targets, last_wo_fp, locked_desired) =
+    let (mut seen_master_net, mut locked_targets, last_wo_fp, locked_desired, saved_peak) =
         match crate::ledger::load(&account) {
             Some(l) => {
                 state.log(
                     LogLevel::Ok,
                     format!("Resumed saved positions ({} symbols) — holding unless the strategy changes.", l.targets.len()),
                 );
-                (l.seen_master_net, l.targets, l.wo_fingerprint, l.desired)
+                (l.seen_master_net, l.targets, l.wo_fingerprint, l.desired, l.peak_balance)
             }
             None => (
                 BTreeMap::<String, f64>::new(),
                 BTreeMap::<String, f64>::new(),
                 None::<String>,
                 Vec::<WorkingOrder>::new(),
+                0.0,
             ),
         };
+    // Seed the high-water mark from the PERSISTED peak so max-drawdown is measured against
+    // the true high across restarts and reconnects — not just this session's starting
+    // equity (which would silently re-baseline the guard lower on every daily reconnect).
+    // If the account has grown above the saved peak, or there's no saved peak, the current
+    // balance stands. The operator can re-baseline this on demand via Reset Drawdown.
+    if saved_peak > peak_balance {
+        peak_balance = saved_peak;
+    }
     let mut last_ledger_save = Instant::now();
 
     // Positions-only mode: this build never places resting limit/stop orders. Cancel any
@@ -238,7 +313,21 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         }
     }
 
-    while state.is_running() {
+    while state.is_running() && state.session_gen.load(Ordering::Relaxed) == my_gen {
+        // ── IB connection heartbeat ──────────────────────────────────────────
+        // ibapi performs its own limited internal reconnect, but once it exhausts its
+        // retries it permanently shuts the bus down; thereafter reads quietly return
+        // empty/zero rather than erroring, which would leave the engine "connected" with a
+        // $0 book that never recovers until the app is restarted. That is precisely the
+        // end-of-day-Gateway-restart and crash-then-re-login failure customers hit. Detect
+        // the dead link and break so the OUTER loop establishes a brand-new connection,
+        // retrying every 15s until the Gateway comes back (e.g. the next morning).
+        if !client.is_connected() {
+            state.log(LogLevel::Warn, "IB connection lost — reconnecting…");
+            state.with_status(|s| s.connected = false);
+            break;
+        }
+
         // ── periodic license re-check (revocation stops trading) ──────────────
         if last_license.elapsed() >= Duration::from_secs(60) {
             last_license = Instant::now();
@@ -322,6 +411,13 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
         let margin = match ib::read_margin(&client, &account) {
             Ok(m) => m,
             Err(e) => {
+                // A read failure caused by a dropped link must reconnect, not retry on a
+                // dead client forever (the old bug: balance reads as $0 and never recovers).
+                if !client.is_connected() {
+                    state.log(LogLevel::Warn, "IB connection lost during balance read — reconnecting…");
+                    state.with_status(|s| s.connected = false);
+                    break;
+                }
                 let warn = last_margin_warn.map(|t| t.elapsed() > Duration::from_secs(30)).unwrap_or(true);
                 if warn {
                     state.log(LogLevel::Warn, format!("Margin/balance read failed: {e} — skipping cycle, will retry."));
@@ -332,6 +428,26 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             }
         };
         let client_balance = margin.net_liq;
+
+        // ── operator-requested drawdown reset ────────────────────────────────
+        // Re-baseline the high-water mark to the CURRENT equity and clear a drawdown halt,
+        // so a client stopped out by a drawdown can resume from here without restarting the
+        // app. Persisted immediately so the new peak survives a restart.
+        if state.reset_hwm.swap(false, Ordering::Relaxed) {
+            if client_balance > 0.0 {
+                peak_balance = client_balance;
+            }
+            dd_breaches = 0;
+            drawdown_hit = false;
+            state.with_status(|s| s.drawdown_hit = false);
+            crate::ledger::save(&account, &seen_master_net, &locked_targets, &last_wo_fp, &locked_desired, peak_balance);
+            last_ledger_save = Instant::now();
+            state.log(
+                LogLevel::Ok,
+                format!("Drawdown high-water mark reset to ${peak_balance:.2} — trading resumes."),
+            );
+        }
+
         let max_dd = state.controls.lock().max_drawdown_pct;
         // Universal "no capacity to open" signal that works across Reg-T, Portfolio
         // Margin, cash, AND paper accounts: IBKR-computed AvailableFunds (= equity −
@@ -355,11 +471,20 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             }
         }
         // Max drawdown is measured from the running PEAK equity (high-water mark), not the
-        // session-start balance, so a profitable run doesn't loosen the guard.
+        // session-start balance, so a profitable run doesn't loosen the guard. The halt is
+        // only armed after the breach persists for several consecutive cycles, so a single
+        // bad/partial balance read can never stop the account out by mistake (which was
+        // painful to recover from). A genuine, sustained drawdown still halts within seconds.
+        const DD_CONFIRM_CYCLES: u32 = 3;
         if client_balance > 0.0 {
             peak_balance = peak_balance.max(client_balance);
             let dd = if peak_balance > 0.0 { (peak_balance - client_balance) / peak_balance * 100.0 } else { 0.0 };
-            if dd >= max_dd && !drawdown_hit {
+            if dd >= max_dd {
+                dd_breaches += 1;
+            } else {
+                dd_breaches = 0;
+            }
+            if dd_breaches >= DD_CONFIRM_CYCLES && !drawdown_hit {
                 drawdown_hit = true;
                 state.log(
                     LogLevel::Err,
@@ -377,6 +502,16 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
                 break; // outer loop reconnects to IB
             }
         };
+
+        // If the link dropped mid-cycle, the position subscription can end early and report
+        // an empty book without erroring. Acting on that phantom-empty book would look like
+        // "the source closed everything" and flatten the account, only to re-open next
+        // reconnect — the exact churn we must never produce. Reconnect instead of trusting it.
+        if !client.is_connected() {
+            state.log(LogLevel::Warn, "IB connection lost — reconnecting…");
+            state.with_status(|s| s.connected = false);
+            break;
+        }
 
         // Always reflect our own IB state in the GUI, whether or not the server is up.
         state.with_status(|s| {
@@ -524,7 +659,7 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
             if changed {
                 state.log(LogLevel::Info, "Strategy updated — re-synced affected symbols.".to_string());
                 // Persist immediately so a restart right after a change resumes the new state.
-                crate::ledger::save(&account, &seen_master_net, &locked_targets, &last_wo_fp, &locked_desired);
+                crate::ledger::save(&account, &seen_master_net, &locked_targets, &last_wo_fp, &locked_desired, peak_balance);
                 last_ledger_save = Instant::now();
             }
         }
@@ -667,16 +802,26 @@ fn run_session(cfg: &ClientConfig, state: &Arc<SharedState>) {
 
         // Persist the ledger on a 15s cadence so the matched state survives a crash/restart.
         if last_ledger_save.elapsed() >= Duration::from_secs(15) {
-            crate::ledger::save(&account, &seen_master_net, &locked_targets, &last_wo_fp, &locked_desired);
+            crate::ledger::save(&account, &seen_master_net, &locked_targets, &last_wo_fp, &locked_desired, peak_balance);
             last_ledger_save = Instant::now();
         }
 
         sleep_running(cfg.sync_interval_secs, state);
     }
 
-    // Save once more on a clean stop so the latest matched state is on disk.
-    crate::ledger::save(&account, &seen_master_net, &locked_targets, &last_wo_fp, &locked_desired);
-    state.log(LogLevel::Warn, "Engine session ended.");
+    // Save once more so the latest matched state is on disk (covers both a clean stop and a
+    // reconnect break — the ledger keeps the book from being resized on the next connect).
+    crate::ledger::save(&account, &seen_master_net, &locked_targets, &last_wo_fp, &locked_desired, peak_balance);
+    let superseded = state.session_gen.load(Ordering::Relaxed) != my_gen;
+    if superseded {
+        // A fresh START replaced this session; engine_main will begin a new one immediately.
+        state.log(LogLevel::Info, "Restarting engine…");
+    } else if state.is_running() {
+        // Broke out to reconnect (link down) while the operator still has the engine on.
+        state.log(LogLevel::Warn, "IB link down — reconnecting until the Gateway returns…");
+    } else {
+        state.log(LogLevel::Warn, "Engine session ended.");
+    }
 }
 
 fn do_close_all(client: &Client, state: &Arc<SharedState>, account: &str) {

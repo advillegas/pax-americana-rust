@@ -34,16 +34,22 @@ fn data_main(_cfg: ClientConfig, state: Arc<SharedState>) {
             let c = state.controls.lock();
             (c.account_mode, c.ib_host.clone(), c.ib_port_live, c.ib_port_paper, c.ib_account.trim().to_string())
         };
-        let port = match mode {
-            AccountMode::Live => live,
-            AccountMode::Paper => paper,
-        };
-        let endpoint = format!("{host}:{port}");
         let cid = stable_client_id().wrapping_add(2);
-
-        let client = match Client::connect(&endpoint, cid) {
-            Ok(c) => c,
-            Err(_) => {
+        let ib_params = crate::ib::IbConnectParams {
+            host: host.clone(),
+            mode,
+            port_live: live,
+            port_paper: paper,
+        };
+        let st = state.clone();
+        let client = match crate::ib::connect_with_fallback(
+            &ib_params,
+            cid,
+            |level, msg| st.log(level, msg),
+            || false,
+        ) {
+            Some(c) => c,
+            None => {
                 state.data_connected.store(false, Ordering::Relaxed);
                 sleep(10);
                 continue;
@@ -88,6 +94,14 @@ fn data_main(_cfg: ClientConfig, state: Arc<SharedState>) {
                 c.account_mode != mode || c.ib_host != host || c.ib_account.trim() != want_account
             };
             if changed {
+                break;
+            }
+
+            // If the link dropped (e.g. the Gateway's end-of-day restart), tear down and
+            // reconnect rather than sitting on a dead subscription showing stale/zeroed
+            // equities. The outer loop re-establishes the connection via port probing.
+            if !client.is_connected() {
+                state.log(LogLevel::Info, "Portfolio data link lost — reconnecting…".to_string());
                 break;
             }
 

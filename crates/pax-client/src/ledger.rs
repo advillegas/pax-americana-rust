@@ -33,6 +33,11 @@ pub struct Ledger {
     pub wo_fingerprint: Option<String>,
     /// Locked desired resting orders.
     pub desired: Vec<WorkingOrder>,
+    /// Persistent peak equity (drawdown high-water mark). Survives restarts/reconnects so
+    /// max-drawdown is measured against the true high, not each session's start. `0.0` /
+    /// missing means "unknown" — the engine seeds it from the current balance.
+    #[serde(default)]
+    pub peak_balance: f64,
 }
 
 /// Load the saved ledger if it exists AND belongs to `account`. Returns `None` otherwise
@@ -64,6 +69,7 @@ pub fn save(
     targets: &BTreeMap<String, f64>,
     wo_fingerprint: &Option<String>,
     desired: &[WorkingOrder],
+    peak_balance: f64,
 ) {
     let l = Ledger {
         account: account.to_string(),
@@ -71,6 +77,7 @@ pub fn save(
         targets: targets.clone(),
         wo_fingerprint: wo_fingerprint.clone(),
         desired: desired.to_vec(),
+        peak_balance,
     };
     if let Ok(bytes) = serde_json::to_vec(&l) {
         appdata::write(FILE, bytes);

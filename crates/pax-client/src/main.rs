@@ -103,6 +103,12 @@ fn main() {
     }
     {
         let state = state.clone();
+        ui.on_reset_drawdown(move || {
+            state.request_reset_drawdown();
+        });
+    }
+    {
+        let state = state.clone();
         ui.on_kill(move || {
             kill_other_instances();
             state.log(LogLevel::Warn, "Kill switch: terminated other instances.");
@@ -486,14 +492,16 @@ fn spawn_detect_accounts(state: std::sync::Arc<SharedState>) {
             let c = state.controls.lock();
             (c.account_mode, c.ib_host.clone(), c.ib_port_live, c.ib_port_paper)
         };
-        let port = match mode {
-            AccountMode::Live => live,
-            AccountMode::Paper => paper,
-        };
-        let endpoint = format!("{host}:{port}");
         let cid = config::stable_client_id().wrapping_add(1);
-        state.log(LogLevel::Info, format!("Detecting accounts on {endpoint}…"));
-        match ib::list_accounts(&endpoint, cid) {
+        let params = ib::IbConnectParams {
+            host,
+            mode,
+            port_live: live,
+            port_paper: paper,
+        };
+        state.log(LogLevel::Info, "Detecting accounts…".to_string());
+        let st = state.clone();
+        match ib::list_accounts_with_fallback(&params, cid, |level, msg| st.log(level, msg)) {
             Ok(list) => {
                 let msg = if list.is_empty() { "none".to_string() } else { list.join(", ") };
                 *state.detected_accounts.lock() = list;

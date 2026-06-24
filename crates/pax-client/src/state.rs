@@ -214,10 +214,18 @@ pub struct ChartView {
 
 pub struct SharedState {
     pub running: AtomicBool,
+    /// Bumped on every START. A running engine session captures this at entry and exits
+    /// when it changes, so a STOP→START (or a second START) always begins a *fresh*
+    /// session instead of resuming a stale one that still carries an old drawdown halt.
+    pub session_gen: AtomicU64,
     pub close_all: AtomicBool,
     /// Set when CLOSE ALL has flattened the book; the engine then halts trading until the
     /// operator presses START again (which clears it). Stays connected/streaming meanwhile.
     pub halted: AtomicBool,
+    /// Operator request to reset the drawdown high-water mark to the current equity. The
+    /// engine consumes it to re-baseline the peak, clear a drawdown halt, and persist —
+    /// letting a client resume after a drawdown stop-out without a full restart.
+    pub reset_hwm: AtomicBool,
     pub controls: Mutex<Controls>,
     pub status: Mutex<Status>,
     pub log: Mutex<LogBuffer>,
@@ -258,8 +266,10 @@ impl SharedState {
     pub fn new() -> Arc<Self> {
         Arc::new(SharedState {
             running: AtomicBool::new(false),
+            session_gen: AtomicU64::new(0),
             close_all: AtomicBool::new(false),
             halted: AtomicBool::new(false),
+            reset_hwm: AtomicBool::new(false),
             controls: Mutex::new(Controls::default()),
             status: Mutex::new(Status::default()),
             log: Mutex::new(LogBuffer::default()),
@@ -305,6 +315,10 @@ impl SharedState {
             s.halted = false;
         });
         self.halted.store(false, Ordering::Relaxed);
+        // Bump the session generation BEFORE flipping running on, so any session still
+        // winding down from a previous STOP exits cleanly and the engine starts fresh
+        // (fresh peak/drawdown state) rather than resuming the halted one.
+        self.session_gen.fetch_add(1, Ordering::Relaxed);
         self.running.store(true, Ordering::Relaxed);
         self.log(LogLevel::Info, "START — engine starting.");
     }
@@ -312,6 +326,13 @@ impl SharedState {
     pub fn stop_engine(&self) {
         self.running.store(false, Ordering::Relaxed);
         self.log(LogLevel::Warn, "STOP — engine stopping.");
+    }
+
+    /// Request a drawdown high-water-mark reset (re-baseline peak to current equity and
+    /// clear a drawdown halt). Applied by the engine on its next cycle while running.
+    pub fn request_reset_drawdown(&self) {
+        self.reset_hwm.store(true, Ordering::Relaxed);
+        self.log(LogLevel::Warn, "Reset drawdown requested — re-baselining high-water mark.");
     }
 
     /// Request a one-shot Close All. Returns false (and logs) if not running.
